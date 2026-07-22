@@ -197,6 +197,16 @@ struct ShakeRecorderModifier: ViewModifier {
         // Catch a partial finalized while the app was fully suspended: the
         // foreground notification does not fire on cold launch.
         offerPendingInterrupted()
+        // Beta-only visible entry point (#584 option C): a non-shake trigger
+        // (Settings "Send feedback now") drives the exact same handleShake()
+        // path a physical shake does, so cooldown/rate-cap/busy suppression
+        // and the confirm-sheet flow are never duplicated.
+        FeedbackManualTrigger.register { handleShake() }
+      }
+      .onDisappear {
+        // Gate flipped off / view torn down: unregister so a stale closure
+        // cannot fire into a modifier instance that no longer exists.
+        FeedbackManualTrigger.unregister()
       }
   }
 
@@ -673,7 +683,7 @@ private struct FeedbackPromptSheet: View {
       VStack(spacing: 6) {
         Text("Something wrong?")
           .font(.headline)
-        Text("Report it with a screen recording - shake again or tap stop to finish.")
+        Text(FeedbackRecordingCopy.promptExplanation)
           .font(.subheadline)
           .foregroundStyle(.secondary)
           .multilineTextAlignment(.center)
