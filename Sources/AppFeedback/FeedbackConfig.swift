@@ -21,18 +21,25 @@ public struct FeedbackConfig: Sendable {
   /// app maps it onto its analytics client. Nil = no emission (today's default,
   /// and the only possibility inside an extension that never builds a config).
   public let onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)?
+  /// Optional stable reporter identity (an account/user id). When nil the SDK
+  /// uses a generated per-install anonymous ref (see `FeedbackUserRef`), so
+  /// resolved-issue notifications can find their way back to this device
+  /// either way. Opaque to the platform; capped at 128 characters.
+  public let userRef: String?
 
   public init(
     app: String,
     collectorURL: URL,
     secret: String,
     maxDuration: TimeInterval = FeedbackConfig.defaultMaxDuration,
-    onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)? = nil
+    onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)? = nil,
+    userRef: String? = nil
   ) {
     self.app = app
     self.collectorURL = collectorURL
     self.secret = secret
     self.maxDuration = maxDuration
     self.onFunnelEvent = onFunnelEvent
+    self.userRef = userRef
   }
 }

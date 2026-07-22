@@ -30,6 +30,7 @@ public final class FeedbackTrail: @unchecked Sendable {
     let app: String
     let build: String
     let startedAt: String
+    let userRef: String?
     let start: Double
     var events: [FeedbackEvent]
   }
@@ -97,7 +98,9 @@ public final class FeedbackTrail: @unchecked Sendable {
   /// event when a buffered name exists. Returns the seeded event count so the
   /// caller can start the Live Activity at the real screen count.
   @discardableResult
-  public func startSession(sessionId: String, app: String, build: String, startedAt: String) -> Int {
+  public func startSession(
+    sessionId: String, app: String, build: String, startedAt: String, userRef: String? = nil
+  ) -> Int {
     lock.lock()
     defer { lock.unlock() }
     let start = now()
@@ -106,7 +109,7 @@ public final class FeedbackTrail: @unchecked Sendable {
       seeded.append(FeedbackEvent(t: 0, screen: last))
     }
     active = Active(
-      sessionId: sessionId, app: app, build: build, startedAt: startedAt,
+      sessionId: sessionId, app: app, build: build, startedAt: startedAt, userRef: userRef,
       start: start, events: seeded)
     buffer.removeAll()
     return seeded.count
@@ -124,7 +127,7 @@ public final class FeedbackTrail: @unchecked Sendable {
     active = nil
     return FeedbackSession(
       session_id: a.sessionId, app: a.app, build: a.build,
-      started_at: a.startedAt, events: a.events)
+      started_at: a.startedAt, user_ref: a.userRef, events: a.events)
   }
 }
 

@@ -271,7 +271,8 @@ struct ShakeRecorderModifier: ViewModifier {
       // completion fires, as close to first-frame time as practical, so the
       // ReplayKit consent/startup latency is not baked into every event offset.
       let seeded = Feedback.shared.startSession(
-        sessionId: id, app: config.app, build: buildNumber(), startedAt: iso8601Now())
+        sessionId: id, app: config.app, build: buildNumber(), startedAt: iso8601Now(),
+        userRef: FeedbackUserRef.resolve(configured: config.userRef))
       recorder = rec
       sessionId = id
       isRecording = true

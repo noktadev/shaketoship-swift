@@ -175,6 +175,7 @@ public struct FeedbackUploader {
     let app: String
     let sessionId: String
     let files: [String]
+    let userRef: String?
   }
 
   private struct PresignResponse: Decodable {
@@ -223,7 +224,9 @@ public struct FeedbackUploader {
     req.setValue(config.secret, forHTTPHeaderField: "x-feedback-secret")
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.httpBody = try JSONEncoder().encode(
-      PresignRequestBody(app: config.app, sessionId: sessionId, files: files))
+      PresignRequestBody(
+        app: config.app, sessionId: sessionId, files: files,
+        userRef: FeedbackUserRef.resolve(configured: config.userRef)))
     let (data, resp) = try await transport.perform(req)
     guard resp.statusCode == 200 else {
       throw FeedbackUploadError.missingPresignedURL("presign status \(resp.statusCode)")

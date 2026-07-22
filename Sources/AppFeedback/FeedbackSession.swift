@@ -92,6 +92,10 @@ public struct FeedbackSession: Codable, Sendable, Equatable {
   public let app: String
   public let build: String
   public let started_at: String
+  /// Stable reporter identity (see `FeedbackUserRef`). The processor copies it
+  /// onto the session record so resolved-issue inbox messages can address this
+  /// reporter. Optional so pre-userRef payloads still decode.
+  public let user_ref: String?
   public let events: [FeedbackEvent]
 
   public init(
@@ -99,12 +103,14 @@ public struct FeedbackSession: Codable, Sendable, Equatable {
     app: String,
     build: String,
     started_at: String,
+    user_ref: String? = nil,
     events: [FeedbackEvent]
   ) {
     self.session_id = session_id
     self.app = app
     self.build = build
     self.started_at = started_at
+    self.user_ref = user_ref
     self.events = events
   }
 }
