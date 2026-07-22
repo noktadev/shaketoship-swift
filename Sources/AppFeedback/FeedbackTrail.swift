@@ -129,6 +129,21 @@ public final class FeedbackTrail: @unchecked Sendable {
       session_id: a.sessionId, app: a.app, build: a.build,
       started_at: a.startedAt, user_ref: a.userRef, events: a.events)
   }
+
+  /// Read-only snapshot of the active recording's assembled session data -
+  /// unlike `stop()`, does NOT end the recording. Used to persist a
+  /// pause-durability sidecar while a background/foreground segment boundary
+  /// is in flight (#669). Returns an empty session when nothing is active.
+  public func snapshot() -> FeedbackSession {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let a = active else {
+      return FeedbackSession(session_id: "", app: "", build: "", started_at: "", events: [])
+    }
+    return FeedbackSession(
+      session_id: a.sessionId, app: a.app, build: a.build,
+      started_at: a.startedAt, user_ref: a.userRef, events: a.events)
+  }
 }
 
 /// Static facade apps call on navigation changes: `Feedback.screen("Home")`.

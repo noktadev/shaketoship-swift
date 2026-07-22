@@ -53,7 +53,9 @@ struct ShakeRecorderModifier: ViewModifier {
   @State private var isRecording = false
   @State private var showConfirm = false
   @State private var errorMessage: String?
-  @State private var recorder: FeedbackRecorder?
+  /// One logical feedback session; its capture is segmented whenever the app
+  /// backgrounds because ReplayKit cannot keep an in-app capture running there.
+  @State private var recordingSession: FeedbackRecordingSession?
   @State private var sessionId: String?
   @State private var capTask: Task<Void, Never>?
   @State private var didRetryOutbox = false
@@ -68,8 +70,10 @@ struct ShakeRecorderModifier: ViewModifier {
   /// Live Activity handle while recording (iOS 16.2+). Stored as `Any?` to avoid
   /// an availability-annotated stored property; cast at use sites.
   @State private var activityBox: Any?
-  /// Wall-clock start of the current recording, for the funnel duration.
-  @State private var recordingStartedAt: Date?
+  /// Active capture time excludes background pauses, preserving the configured
+  /// ReplayKit duration cap across any number of resumed segments.
+  @State private var capturedDuration: TimeInterval = 0
+  @State private var captureSegmentStartedAt: TimeInterval?
   /// Monotonic time (systemUptime) of the last prompt dismissal; arms the
   /// 60s cooldown that stops a walking-with-phone nag loop.
   @State private var lastDismissedAt: TimeInterval?
@@ -82,6 +86,9 @@ struct ShakeRecorderModifier: ViewModifier {
   /// flips, so a scene deactivation during that window is recorded here and a
   /// start completing afterwards immediately stops.
   @State private var startGuard = FeedbackStartGuard()
+  /// Distinguishes a temporary background from the modifier being removed
+  /// while ReplayKit start is in flight. Removal must terminate, not resume.
+  @State private var terminatePendingStart = false
   /// #472: a finalized interrupted partial could not be presented yet (no scene
   /// / a review already up). Kept armed so `didBecomeActive` retries the offer
   /// until it is presented or the user answers it. Disk is the durable source of
@@ -154,11 +161,12 @@ struct ShakeRecorderModifier: ViewModifier {
       .onReceive(
         NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)
       ) { _ in
-        // Background = capture will be interrupted; finalize what exists.
+        // ReplayKit cannot capture while the app is backgrounded. Close only
+        // the current MOV segment and keep the logical feedback session open.
         // #453: also record the deactivation so a start still awaiting ReplayKit
         // (isRecording not yet true) aborts the moment it completes.
         startGuard.deactivate()
-        if isRecording { Task { await stopRecording(.interruption) } }
+        if isRecording { Task { await pauseRecording() } }
       }
       // #472: on return, offer to send a recording the background interruption
       // finalized while the app was away ("your recording stopped when you left
@@ -168,7 +176,11 @@ struct ShakeRecorderModifier: ViewModifier {
         NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
       ) { _ in
         startGuard.activate()
-        offerPendingInterrupted()
+        if recordingSession != nil {
+          Task { await resumeRecording() }
+        } else {
+          offerPendingInterrupted()
+        }
       }
       // #472 finding 4: the finalization of an interruption can land AFTER
       // willEnterForeground fires (the stop path is async), so the marker may not
@@ -179,18 +191,24 @@ struct ShakeRecorderModifier: ViewModifier {
         NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
       ) { _ in
         startGuard.activate()
-        offerPendingInterrupted()
+        if recordingSession != nil {
+          Task { await resumeRecording() }
+        } else {
+          offerPendingInterrupted()
+        }
       }
       // Gate flipped OFF (opt-in toggled, flag refresh) while a capture is live:
       // removing the modifier must not leak a running ReplayKit session. The
       // interruption path finalizes to the outbox without UI and stays
       // unconfirmed, so it is purged once stale, never uploaded.
       .onDisappear {
+        terminatePendingStart = true
         startGuard.deactivate()
-        if isRecording { Task { await stopRecording(.interruption) } }
+        if recordingSession != nil { Task { await stopRecording(.interruption) } }
       }
       .onAppear {
         // #453: a fresh appear is an active scene - allow starts.
+        terminatePendingStart = false
         startGuard.activate()
         endStaleLiveActivities()
         retryOutboxOnce()
@@ -250,7 +268,7 @@ struct ShakeRecorderModifier: ViewModifier {
   private func startRecording() async {
     // Reject double-start (double-tapped "Record" / shake while consent pending)
     // and start while a prior stop is still finalizing.
-    guard !busy, !isRecording, recorder == nil else { return }
+    guard !busy, !isRecording, recordingSession == nil else { return }
     // #453: reserve this start's generation BEFORE anything else. `begin()`
     // returns nil when the scene is inactive - i.e. this start was queued (e.g.
     // from the prompt sheet's onDismiss) but a backgrounding / onDisappear ran
@@ -264,19 +282,21 @@ struct ShakeRecorderModifier: ViewModifier {
 
     let rec = FeedbackRecorder(
       maxDuration: config.maxDuration,
-      onInterruption: { Task { @MainActor in await stopRecording(.interruption) } })
+      onInterruption: { Task { @MainActor in await pauseRecording() } })
+    let lifecycle = FeedbackRecordingSession(directory: dir, capture: rec)
     do {
-      try await rec.start(to: dir.appendingPathComponent("recording.mov"))
+      try await lifecycle.start()
       // Timestamp alignment: seed the trail (t=0) only AFTER startCapture's
       // completion fires, as close to first-frame time as practical, so the
       // ReplayKit consent/startup latency is not baked into every event offset.
       let seeded = Feedback.shared.startSession(
         sessionId: id, app: config.app, build: buildNumber(), startedAt: iso8601Now(),
         userRef: FeedbackUserRef.resolve(configured: config.userRef))
-      recorder = rec
+      recordingSession = lifecycle
       sessionId = id
       isRecording = true
-      recordingStartedAt = Date()
+      capturedDuration = 0
+      captureSegmentStartedAt = ProcessInfo.processInfo.systemUptime
       config.onFunnelEvent?(.recordingStarted)
       FeedbackHaptics.impact()
       startLiveActivity(startedAt: Date(), screenCount: seeded)
@@ -293,10 +313,7 @@ struct ShakeRecorderModifier: ViewModifier {
       Feedback.shared.setActiveEventHandler { count in
         Task { @MainActor in updateLiveActivity(screenCount: count) }
       }
-      capTask = Task {
-        try? await Task.sleep(nanoseconds: UInt64(config.maxDuration * 1_000_000_000))
-        if !Task.isCancelled { await stopRecording(.cap) }
-      }
+      armCaptureCap(after: config.maxDuration)
     } catch {
       try? FileManager.default.removeItem(at: dir)
       errorMessage = startFailureMessage(for: error)
@@ -306,24 +323,111 @@ struct ShakeRecorderModifier: ViewModifier {
     // is stale, so tear it down immediately (finalized+unconfirmed like any other
     // interruption). Runs after `busy = false` so stopRecording proceeds cleanly.
     if isRecording, startGuard.shouldAbort(startedEpoch: startToken) {
-      await stopRecording(.interruption)
+      if terminatePendingStart {
+        await stopRecording(.interruption)
+      } else {
+        await pauseRecording()
+      }
     }
   }
 
+  /// Cleanly closes the current capture segment without ending the feedback
+  /// trail or review session. A foreground lifecycle event resumes it.
+  private func pauseRecording() async {
+    guard !busy, isRecording, let lifecycle = recordingSession, let id = sessionId else { return }
+    busy = true
+    isRecording = false
+    accumulateCaptureDuration()
+    capTask?.cancel()
+    capTask = nil
+    FeedbackTapCapture.remove()
+    FeedbackLiveActivityStop.unregister()
+    endLiveActivity()
+
+    let dir = outboxRoot().appendingPathComponent(id, isDirectory: true)
+    var pauseError: Error?
+    await withFeedbackBackgroundTask("afb.pause") {
+      do {
+        try await lifecycle.pause()
+      } catch {
+        pauseError = error
+        return
+      }
+      // #669 MUST-FIX 1: persist events.json + the `.interrupted` marker
+      // synchronously, under this same background-task assertion, so a
+      // background app kill during the pause window still lets the launch
+      // sweep discover + offer this partial - the same durability the old
+      // hard `stopRecording(.interruption)` path gave a backgrounded session
+      // before pause/resume existed.
+      let segments = await lifecycle.snapshotSegments()
+      let trail = Feedback.shared.snapshot()
+      let session = FeedbackSession(
+        session_id: trail.session_id, app: trail.app, build: trail.build,
+        started_at: trail.started_at, user_ref: trail.user_ref, events: trail.events,
+        segments: segments)
+      writeFeedbackPauseDurability(in: dir, session: session)
+    }
+    if pauseError != nil {
+      busy = false
+      await stopRecording(.interruption)
+      return
+    }
+    busy = false
+    // A quick app-switch can foreground before ReplayKit finishes closing the
+    // segment. Resume here so neither foreground notification race can strand
+    // the logical session in `.paused` (#491-style late completion).
+    if UIApplication.shared.applicationState == .active {
+      await resumeRecording()
+    }
+  }
+
+  /// Starts the next ReplayKit segment in the same logical session after the
+  /// app returns. Failure falls back to the durable interrupted-session offer.
+  private func resumeRecording() async {
+    guard !busy, !isRecording, let lifecycle = recordingSession, let id = sessionId else { return }
+    guard await lifecycle.state == .paused else { return }
+    busy = true
+    do {
+      try await lifecycle.resume()
+      isRecording = true
+      // #669 MUST-FIX 1: the session is live again - clear the
+      // pause-durability marker so the launch sweep / foreground offer scan
+      // stop treating this dir as an interrupted partial while it is still
+      // open in-process.
+      clearFeedbackPauseDurability(
+        in: outboxRoot().appendingPathComponent(id, isDirectory: true))
+      captureSegmentStartedAt = ProcessInfo.processInfo.systemUptime
+      FeedbackTapCapture.install()
+      FeedbackLiveActivityStop.register { await stopRecording(.user) }
+      // #669 CHEAP SHOULD-FIX 4: carry the accumulated screen count into the
+      // resumed Live Activity instead of resetting the visible counter to 0.
+      let screenCount = Feedback.shared.snapshot().events.count(where: { $0.screen != nil })
+      startLiveActivity(
+        startedAt: Date().addingTimeInterval(-capturedDuration), screenCount: screenCount)
+      armCaptureCap(after: max(0, config.maxDuration - capturedDuration))
+    } catch {
+      busy = false
+      await stopRecording(.interruption)
+      return
+    }
+    busy = false
+  }
+
   private func stopRecording(_ reason: StopReason) async {
-    guard isRecording, let rec = recorder, let id = sessionId else { return }
+    guard let lifecycle = recordingSession, let id = sessionId else { return }
     // Capture locals and clear @State BEFORE any await: a recording started
     // during this stop's slow upload must not be clobbered by the epilogue.
     capTask?.cancel()
     capTask = nil
-    recorder = nil
+    recordingSession = nil
     sessionId = nil
+    if isRecording { accumulateCaptureDuration() }
     isRecording = false
     busy = true
 
-    let duration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-    recordingStartedAt = nil
-
+    let duration = capturedDuration
+    capturedDuration = 0
+    captureSegmentStartedAt = nil
     FeedbackHaptics.impact()
     FeedbackLiveActivityStop.unregister()
     Feedback.shared.setActiveEventHandler(nil)
@@ -336,13 +440,24 @@ struct ShakeRecorderModifier: ViewModifier {
     // finish the finalize instead of being suspended mid-write (#341).
     await withFeedbackBackgroundTask("afb.stop") {
       do {
-        let url = try await rec.stop()
+        let segments = try await lifecycle.finalize()
+        guard let firstSegment = segments.first else {
+          throw FeedbackRecorderError.emptyRecording
+        }
         // Only count a genuinely captured session in the funnel: emit AFTER a
         // successful stop, so an emptyRecording / writeFailed throw below (or an
         // interruption) never inflates the "recorded" metric.
         config.onFunnelEvent?(.recordingStopped(durationSeconds: duration, reason: reason.funnelReason))
-        let outDir = url.deletingLastPathComponent()
-        let data = try JSONEncoder().encode(session)
+        let outDir = dir
+        let segmentedSession = FeedbackSession(
+          session_id: session.session_id,
+          app: session.app,
+          build: session.build,
+          started_at: session.started_at,
+          user_ref: session.user_ref,
+          events: session.events,
+          segments: segments)
+        let data = try JSONEncoder().encode(segmentedSession)
         try data.write(to: outDir.appendingPathComponent("events.json"))
         if reason == .interruption {
           // A call/background interruption cannot reliably present UI. Leave the
@@ -377,7 +492,10 @@ struct ShakeRecorderModifier: ViewModifier {
           // available (backgrounded stop), the session stays finalized but
           // UNCONFIRMED in the outbox, exactly like the interruption path above.
           let data = FeedbackReviewData(
-            id: id, movURL: url, dir: outDir, events: session.events)
+            id: id,
+            movURL: outDir.appendingPathComponent(firstSegment.file),
+            dir: outDir,
+            events: session.events)
           _ = reviewPresenter.present(
             data: data,
             onUpload: { Task { await confirmUpload(data) } },
@@ -401,6 +519,22 @@ struct ShakeRecorderModifier: ViewModifier {
     // backgrounded the presentation is a no-op and the disk marker keeps the
     // partial pending for the next didBecomeActive.
     if reason == .interruption { offerPendingInterrupted() }
+  }
+
+  private func accumulateCaptureDuration() {
+    guard let started = captureSegmentStartedAt else { return }
+    capturedDuration += max(0, ProcessInfo.processInfo.systemUptime - started)
+    captureSegmentStartedAt = nil
+  }
+
+  private func armCaptureCap(after duration: TimeInterval) {
+    capTask?.cancel()
+    capTask = Task {
+      if duration > 0 {
+        try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+      }
+      if !Task.isCancelled { await stopRecording(.cap) }
+    }
   }
 
   /// Review-sheet Upload: mark the session user-confirmed, then flush. The
@@ -477,7 +611,9 @@ struct ShakeRecorderModifier: ViewModifier {
     // Fast MainActor pre-check: never interrupt a live capture, a pending
     // prompt, or an open review. (Re-checked via the planner after the off-main
     // scan below, since state can change across the await.)
-    guard !isRecording, !busy, !showConfirm, !reviewPresenter.isPresenting else { return }
+    guard recordingSession == nil, !isRecording, !busy, !showConfirm,
+      !reviewPresenter.isPresenting
+    else { return }
     // #472 NEW-2: single-flight. Concurrent lifecycle ticks (foreground +
     // didBecomeActive + a stop/review epilogue) must not each spawn a scan and
     // race to present the same partial twice.
@@ -496,7 +632,8 @@ struct ShakeRecorderModifier: ViewModifier {
       switch FeedbackOfferPlanner.decide(
         scanResult: scan,
         busy: busy,
-        presentationPossible: !isRecording && !showConfirm && !reviewPresenter.isPresenting,
+        presentationPossible: recordingSession == nil && !isRecording && !showConfirm
+          && !reviewPresenter.isPresenting,
         scanInFlight: false,  // this task IS the in-flight scan; guarded above.
         now: Date())
       {
@@ -591,7 +728,7 @@ struct ShakeRecorderModifier: ViewModifier {
   /// touch a recording this process owns.
   private func endStaleLiveActivities() {
     #if os(iOS)
-    guard !isRecording, activityBox == nil else { return }
+    guard recordingSession == nil, !isRecording, activityBox == nil else { return }
     if #available(iOS 16.2, *) {
       FeedbackLiveActivityController.endStale()
     }

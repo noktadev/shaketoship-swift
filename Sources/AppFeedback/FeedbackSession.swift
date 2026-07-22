@@ -97,6 +97,9 @@ public struct FeedbackSession: Codable, Sendable, Equatable {
   /// reporter. Optional so pre-userRef payloads still decode.
   public let user_ref: String?
   public let events: [FeedbackEvent]
+  /// Ordered capture files for this logical session. Optional so sidecars from
+  /// before segmented recording remain source- and wire-compatible.
+  public let segments: [FeedbackRecordingSegment]?
 
   public init(
     session_id: String,
@@ -104,7 +107,8 @@ public struct FeedbackSession: Codable, Sendable, Equatable {
     build: String,
     started_at: String,
     user_ref: String? = nil,
-    events: [FeedbackEvent]
+    events: [FeedbackEvent],
+    segments: [FeedbackRecordingSegment]? = nil
   ) {
     self.session_id = session_id
     self.app = app
@@ -112,5 +116,6 @@ public struct FeedbackSession: Codable, Sendable, Equatable {
     self.started_at = started_at
     self.user_ref = user_ref
     self.events = events
+    self.segments = segments
   }
 }

@@ -256,6 +256,8 @@ public actor FeedbackRecorder {
   }
 }
 
+extension FeedbackRecorder: FeedbackCapture {}
+
 /// Serial, lock-guarded bridge between ReplayKit's delivery queue and the
 /// `AVAssetWriter`. All writer/input mutation happens here under `lock`, so the
 /// actor's `stop()` can quiesce it and then finalize without racing an append.

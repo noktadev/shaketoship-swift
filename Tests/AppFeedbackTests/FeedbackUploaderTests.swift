@@ -62,6 +62,35 @@ import Testing
     #expect(obj["files"] as? [String] == ["recording.mov", "events.json"])
   }
 
+  @Test func flushUploadsAllOrderedRecordingSegments() async throws {
+    let root = try makeOutbox(sessionId: "s1")
+    let dir = root.appendingPathComponent("s1")
+    try Data("video-2".utf8).write(to: dir.appendingPathComponent("recording-002.mov"))
+    let presign = Data(
+      #"{"urls":{"recording.mov":"https://r2/mov","recording-002.mov":"https://r2/mov2","events.json":"https://r2/json"}}"#.utf8)
+    let transport = FakeTransport([
+      .init(status: 200, data: presign),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+    ])
+    let uploader = FeedbackUploader(
+      config: makeConfig(), transport: transport,
+      fileManager: .default, outboxRoot: root)
+
+    let ok = await uploader.flush(sessionId: "s1")
+
+    #expect(ok)
+    let body = try #require(transport.requests.first?.httpBody)
+    let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+    #expect(
+      json["files"] as? [String]
+        == ["recording.mov", "recording-002.mov", "events.json"])
+    #expect(transport.uploads.map(\.file.lastPathComponent) == [
+      "recording.mov", "recording-002.mov", "events.json",
+    ])
+  }
+
   @Test func successfulUploadDeletesLocalSessionDir() async throws {
     let root = try makeOutbox(sessionId: "s1")
     let dir = root.appendingPathComponent("s1")

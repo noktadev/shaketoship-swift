@@ -4,6 +4,25 @@ import Testing
 @testable import AppFeedback
 
 @Suite struct FeedbackSessionTests {
+  @Test func encodesOrderedRecordingSegments() throws {
+    let session = FeedbackSession(
+      session_id: "s1",
+      app: "dotself",
+      build: "42",
+      started_at: "2026-07-15T00:00:00Z",
+      events: [],
+      segments: [
+        FeedbackRecordingSegment(file: "recording.mov"),
+        FeedbackRecordingSegment(file: "recording-002.mov"),
+      ])
+
+    let data = try JSONEncoder().encode(session)
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let segments = try #require(json["segments"] as? [[String: Any]])
+
+    #expect(segments.map { $0["file"] as? String } == ["recording.mov", "recording-002.mov"])
+  }
+
   @Test func encodesSidecarShapeWithSnakeCaseKeys() throws {
     let session = FeedbackSession(
       session_id: "s1",

@@ -37,7 +37,8 @@ public enum FeedbackUploadError: Error {
   case missingPresignedURL(String)
 }
 
-/// The set of files uploaded per session, in stable order.
+/// The original capture files. Additional segments use
+/// `recording-NNN.mov` and are discovered with a strict filename check.
 let feedbackFileNames = ["recording.mov", "events.json"]
 
 /// Local confirmation marker written into a session dir when the user taps
@@ -93,6 +94,34 @@ private func writeFeedbackMarker(
     }
   }
   return false
+}
+
+/// Persists a pause-durability sidecar: the segments closed so far plus the
+/// `.interrupted` marker, written synchronously while backgrounding closes a
+/// segment (#669). Without this, `pendingInterruptedSessions` cannot find a
+/// paused session that never resumes because iOS killed the app while it was
+/// backgrounded, so the partial silently vanishes once `retryOutbox` purges
+/// the unconfirmed dir. `clearFeedbackPauseDurability` below undoes this on a
+/// successful resume; the next pause simply overwrites `events.json` with the
+/// latest segments. Never uploaded on its own - the marker only makes the
+/// finalized partial DISCOVERABLE, exactly like the interruption path in
+/// `stopRecording`.
+@discardableResult
+func writeFeedbackPauseDurability(in dir: URL, session: FeedbackSession) -> Bool {
+  guard let data = try? JSONEncoder().encode(session) else { return false }
+  do {
+    try data.write(to: dir.appendingPathComponent("events.json"))
+  } catch {
+    return false
+  }
+  return writeFeedbackInterruptedMarker(in: dir)
+}
+
+/// Clears the pause-durability marker written above once a paused session
+/// resumes - it is live again in-process, so it must not be offered by the
+/// next foreground scan as an interrupted partial (#669).
+func clearFeedbackPauseDurability(in dir: URL) {
+  try? FileManager.default.removeItem(at: dir.appendingPathComponent(feedbackInterruptedMarker))
 }
 
 /// An interrupted-but-finalized session awaiting a foreground resend offer.
@@ -211,11 +240,23 @@ public struct FeedbackUploader {
     }
   }
 
-  /// Whitelisted files that actually exist in `dir`, in stable `feedbackFileNames` order.
+  /// Whitelisted files that actually exist in `dir`, in capture order followed
+  /// by the JSON sidecar. Marker and arbitrary files never leave the device.
   private func existingFiles(in dir: URL) -> [String] {
-    feedbackFileNames.filter {
+    let entries =
+      (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+    let additionalSegments = entries.map(\.lastPathComponent)
+      .filter(Self.isAdditionalSegment)
+      .sorted()
+    return (["recording.mov"] + additionalSegments + ["events.json"]).filter {
       fileManager.fileExists(atPath: dir.appendingPathComponent($0).path)
     }
+  }
+
+  private static func isAdditionalSegment(_ name: String) -> Bool {
+    guard name.hasPrefix("recording-"), name.hasSuffix(".mov") else { return false }
+    let digits = name.dropFirst("recording-".count).dropLast(".mov".count)
+    return digits.count == 3 && digits.allSatisfy(\.isNumber) && Int(digits).map { $0 >= 2 } == true
   }
 
   private func presign(sessionId: String, files: [String]) async throws -> [String: String] {
