@@ -55,6 +55,7 @@ enum FeedbackRecorderOwnership {
 
 #if os(iOS)
 import AVFoundation
+import AppFeedbackCapture
 import ReplayKit
 
 /// Device-only in-app screen recorder: ReplayKit `startCapture` video + mic
@@ -71,7 +72,7 @@ public actor FeedbackRecorder {
   private let onInterruption: (@Sendable () -> Void)?
 
   private var writer: AVAssetWriter?
-  private var sink: WriterSink?
+  private var sink: CaptureWriterSink?
   private var outputURL: URL?
 
   public init(maxDuration: TimeInterval = 300, onInterruption: (@Sendable () -> Void)? = nil) {
@@ -137,8 +138,12 @@ public actor FeedbackRecorder {
     assetWriter.add(video)
     assetWriter.add(audio)
 
-    let sink = WriterSink(
-      writer: assetWriter, videoInput: video, audioInput: audio, maxDuration: maxDuration)
+    // In-app capture carries exactly one audio track (the mic). The broadcast
+    // upload extension passes two - narration plus app audio - through the same
+    // sink, which is why the audio side is a map rather than a single input.
+    let sink = CaptureWriterSink(
+      writer: assetWriter, videoInput: video, audioInputs: [.narration: audio],
+      maxDuration: maxDuration)
 
     recorder.isMicrophoneEnabled = true
 
@@ -159,7 +164,16 @@ public actor FeedbackRecorder {
             interruption?()
             return
           }
-          sink.append(sample, of: bufferType)
+          // ReplayKit's buffer-type enum stops here: CaptureWriterSink must not
+          // link ReplayKit, so it stays linkable from an app extension.
+          switch bufferType {
+          case .video:
+            sink.appendVideo(sample)
+          case .audioMic:
+            sink.appendAudio(sample, track: .narration)
+          default:
+            break
+          }
         },
         completionHandler: { error in
           if let error { cont.resume(throwing: error) } else { cont.resume() }
@@ -257,78 +271,4 @@ public actor FeedbackRecorder {
 }
 
 extension FeedbackRecorder: FeedbackCapture {}
-
-/// Serial, lock-guarded bridge between ReplayKit's delivery queue and the
-/// `AVAssetWriter`. All writer/input mutation happens here under `lock`, so the
-/// actor's `stop()` can quiesce it and then finalize without racing an append.
-private final class WriterSink: @unchecked Sendable {
-  private let lock = NSLock()
-  private let writer: AVAssetWriter
-  private let videoInput: AVAssetWriterInput
-  private let audioInput: AVAssetWriterInput
-  private let maxDuration: TimeInterval
-
-  private var startPTS: CMTime?
-  private var started = false
-  private var reachedCap = false
-  private var quiesced = false
-
-  init(
-    writer: AVAssetWriter, videoInput: AVAssetWriterInput,
-    audioInput: AVAssetWriterInput, maxDuration: TimeInterval
-  ) {
-    self.writer = writer
-    self.videoInput = videoInput
-    self.audioInput = audioInput
-    self.maxDuration = maxDuration
-  }
-
-  /// Called synchronously on ReplayKit's queue for each sample buffer.
-  func append(_ sample: CMSampleBuffer, of type: RPSampleBufferType) {
-    lock.lock()
-    defer { lock.unlock() }
-    guard !quiesced, CMSampleBufferDataIsReady(sample) else { return }
-
-    let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-    if !started {
-      // startWriting returns false on failure (status flips to .failed).
-      guard writer.startWriting() else { return }
-      writer.startSession(atSourceTime: pts)
-      startPTS = pts
-      started = true
-    }
-    // Hard cap: stop feeding samples once maxDuration elapses; behaves like a
-    // normal stop (the modifier's timer performs the finalize).
-    if let start = startPTS {
-      let elapsed = CMTimeGetSeconds(CMTimeSubtract(pts, start))
-      if elapsed >= maxDuration { reachedCap = true }
-    }
-    guard !reachedCap, writer.status == .writing else { return }
-
-    switch type {
-    case .video:
-      if videoInput.isReadyForMoreMediaData { videoInput.append(sample) }
-    case .audioMic:
-      if audioInput.isReadyForMoreMediaData { audioInput.append(sample) }
-    default:
-      break
-    }
-  }
-
-  /// Blocks further appends and reports whether any sample was ever written.
-  func quiesce() -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    quiesced = true
-    return started
-  }
-
-  /// Marks both inputs finished. Call only after `quiesce()` returned true.
-  func markFinished() {
-    lock.lock()
-    defer { lock.unlock() }
-    videoInput.markAsFinished()
-    audioInput.markAsFinished()
-  }
-}
 #endif
