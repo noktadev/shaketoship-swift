@@ -221,9 +221,35 @@ public struct FeedbackUploader {
     let dir = outboxRoot.appendingPathComponent(sessionId, isDirectory: true)
     let present = existingFiles(in: dir)
     guard !present.isEmpty else { return false }
+    guard await upload(sessionId: sessionId, from: dir, files: present) else { return false }
     do {
-      let urls = try await presign(sessionId: sessionId, files: present)
-      for name in present {
+      try fileManager.removeItem(at: dir)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /// Presigns and PUTs `files` out of `dir`, and does NOTHING else - no
+  /// deletion, no marker handling, no directory-layout assumption.
+  ///
+  /// Split out of `flush` for the broadcast harvest, whose sessions live in the
+  /// shared App Group container rather than the app's outbox, are named
+  /// `capture.mov` / `manifest.json`, and whose deletion is owned by the caller
+  /// (`FeedbackBroadcastManager.harvest` deletes through `BroadcastContainer`,
+  /// and only once this call has returned true). Copying a ~100 MB capture into
+  /// the outbox first, purely to reuse `flush`, would double both the disk
+  /// usage and the window in which a jetsam kill loses the file.
+  ///
+  /// - Returns: true only when EVERY file returned HTTP 200. False on a presign
+  ///   failure, a missing presigned URL, a non-200 PUT, or a transport error -
+  ///   never partially true, so a caller can treat it as "the bytes are on the
+  ///   server" before deleting anything.
+  public func upload(sessionId: String, from dir: URL, files: [String]) async -> Bool {
+    guard !files.isEmpty else { return false }
+    do {
+      let urls = try await presign(sessionId: sessionId, files: files)
+      for name in files {
         guard let putURLString = urls[name], let putURL = URL(string: putURLString) else {
           throw FeedbackUploadError.missingPresignedURL(name)
         }
@@ -233,7 +259,6 @@ public struct FeedbackUploader {
           req, fromFile: dir.appendingPathComponent(name))
         guard resp.statusCode == 200 else { return false }
       }
-      try fileManager.removeItem(at: dir)
       return true
     } catch {
       return false
