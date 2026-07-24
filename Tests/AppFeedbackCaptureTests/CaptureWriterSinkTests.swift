@@ -1,4 +1,5 @@
 import AVFoundation
+import CaptureTestSupport
 import CoreMedia
 import Foundation
 import Testing

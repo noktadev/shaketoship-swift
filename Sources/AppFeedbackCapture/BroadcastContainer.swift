@@ -150,11 +150,26 @@ public struct BroadcastContainer: Sendable {
   /// Rewrites the manifest in a terminal state, stamping duration and the byte
   /// count of whatever media actually landed (0 when the writer never created
   /// the file).
+  ///
+  /// - Parameter observedAudioTracks: The audio tracks that actually received a
+  ///   sample, when the caller knows. Only the writer knows this - a track is
+  ///   configured before anyone can tell whether the mic is live or the app is
+  ///   silent - so `mint` cannot declare it and the flags are corrected here.
+  ///   Pass `nil` (the default) to leave whatever the manifest already claims,
+  ///   which is what `sweep` does: a session it reclassifies as `.aborted`
+  ///   never got a `finalize` from the extension, so nobody observed its tracks
+  ///   and its flags stay as minted. Consumers must treat the flags on an
+  ///   `.aborted` manifest as unknown rather than as "no audio".
   @discardableResult
   public func finalize(
-    sessionId: String, state: BroadcastManifest.State, durationSeconds: Double
+    sessionId: String, state: BroadcastManifest.State, durationSeconds: Double,
+    observedAudioTracks: Set<CaptureAudioTrack>? = nil
   ) throws -> BroadcastManifest {
     var manifest = try readManifest(sessionId)
+    if let observedAudioTracks {
+      manifest.hasNarration = observedAudioTracks.contains(.narration)
+      manifest.hasAppAudio = observedAudioTracks.contains(.appAudio)
+    }
     // The directory name is authoritative, not the body's own claim (see
     // `write`'s doc comment) - correct it here too so a divergent embedded
     // `sessionId` is durably repaired the moment this session is finalized,

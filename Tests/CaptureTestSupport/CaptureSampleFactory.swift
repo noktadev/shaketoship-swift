@@ -5,11 +5,11 @@ import Foundation
 /// Builds REAL `CMSampleBuffer`s so the sink is exercised against a real
 /// `AVAssetWriter` producing a real file. Nothing here is a stand-in for the
 /// code under test - these are the same buffer shapes ReplayKit delivers.
-enum CaptureSampleFactory {
-  static let audioSampleRate: Double = 44_100
-  static let audioFramesPerBuffer = 1_024
+public enum CaptureSampleFactory {
+  public static let audioSampleRate: Double = 44_100
+  public static let audioFramesPerBuffer = 1_024
 
-  static func videoSample(at pts: CMTime, width: Int = 320, height: Int = 240) -> CMSampleBuffer? {
+  public static func videoSample(at pts: CMTime, width: Int = 320, height: Int = 240) -> CMSampleBuffer? {
     var pixelBuffer: CVPixelBuffer?
     let attributes: CFDictionary =
       [
@@ -45,9 +45,17 @@ enum CaptureSampleFactory {
 
   /// Mono 16-bit LPCM silence - exactly what ReplayKit hands over, which the
   /// AAC-configured writer input then encodes.
-  static func audioSample(at pts: CMTime, frames: Int = audioFramesPerBuffer) -> CMSampleBuffer? {
+  ///
+  /// `sampleRate` defaults to `audioSampleRate` so every existing call site is
+  /// unaffected. Pass a matching value when feeding an input configured at a
+  /// different rate (see `audioInput(sampleRate:)`): the pair of them is what
+  /// lets a test tell two audio inputs apart in the finished file without
+  /// relying on the encoder to resample a mismatched PCM shape.
+  public static func audioSample(
+    at pts: CMTime, frames: Int = audioFramesPerBuffer, sampleRate: Double = audioSampleRate
+  ) -> CMSampleBuffer? {
     var asbd = AudioStreamBasicDescription(
-      mSampleRate: audioSampleRate,
+      mSampleRate: sampleRate,
       mFormatID: kAudioFormatLinearPCM,
       mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
       mBytesPerPacket: 2,
@@ -88,17 +96,25 @@ enum CaptureSampleFactory {
     return sample
   }
 
-  static func audioPTS(bufferIndex: Int) -> CMTime {
+  public static func audioPTS(bufferIndex: Int, sampleRate: Double = audioSampleRate) -> CMTime {
     CMTime(
-      value: CMTimeValue(bufferIndex * audioFramesPerBuffer), timescale: CMTimeScale(audioSampleRate)
+      value: CMTimeValue(bufferIndex * audioFramesPerBuffer), timescale: CMTimeScale(sampleRate)
     )
   }
 
-  static func videoPTS(frameIndex: Int) -> CMTime {
+  /// Seconds of media `count` buffers of `frames` samples represent at
+  /// `sampleRate` - the expected duration of the track those buffers land in.
+  public static func expectedSeconds(
+    bufferCount: Int, frames: Int = audioFramesPerBuffer, sampleRate: Double = audioSampleRate
+  ) -> Double {
+    Double(bufferCount * frames) / sampleRate
+  }
+
+  public static func videoPTS(frameIndex: Int) -> CMTime {
     CMTime(value: CMTimeValue(frameIndex), timescale: 30)
   }
 
-  static func videoInput(width: Int = 320, height: Int = 240) -> AVAssetWriterInput {
+  public static func videoInput(width: Int = 320, height: Int = 240) -> AVAssetWriterInput {
     let input = AVAssetWriterInput(
       mediaType: .video,
       outputSettings: [
@@ -116,7 +132,7 @@ enum CaptureSampleFactory {
   /// marker of which one actually received buffers - see
   /// `swappedTrackKeysAreCaughtByTheSurvivingTracksConfiguredSampleRate` in
   /// CaptureWriterSinkTests.
-  static func audioInput(sampleRate: Double = audioSampleRate) -> AVAssetWriterInput {
+  public static func audioInput(sampleRate: Double = audioSampleRate) -> AVAssetWriterInput {
     let input = AVAssetWriterInput(
       mediaType: .audio,
       outputSettings: [
@@ -129,7 +145,7 @@ enum CaptureSampleFactory {
     return input
   }
 
-  static func outputURL() -> URL {
+  public static func outputURL() -> URL {
     URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
       .appendingPathComponent("sink-\(UUID().uuidString).mov")
   }
