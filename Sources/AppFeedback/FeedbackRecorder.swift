@@ -63,7 +63,23 @@ import ReplayKit
 /// NOT unit tested - ReplayKit is device-only. Kept thin and isolated from the
 /// tested logic (session model, trail, uploader).
 public actor FeedbackRecorder {
-  private let recorder = RPScreenRecorder.shared()
+  /// #943: built lazily, INSIDE actor isolation. The first
+  /// `RPScreenRecorder.shared()` in a process is a synchronous XPC handshake
+  /// with `replayd`, and a stored-property initializer runs as part of the
+  /// non-isolated `init`, i.e. on whatever thread constructs the actor. That
+  /// caller is the MainActor shake-to-record start path, so the handshake parked
+  /// the main thread in `mach_msg` (Sentry `App Hang Fully Blocked`). Every
+  /// `recorder` use below is in an actor-isolated method, so the handshake now
+  /// happens on the actor's executor. Actors are reference types, hence the
+  /// accessor may populate the cache without being `mutating`.
+  private var cachedRecorder: RPScreenRecorder?
+  private var recorder: RPScreenRecorder {
+    if let cachedRecorder { return cachedRecorder }
+    let created = RPScreenRecorder.shared()
+    cachedRecorder = created
+    return created
+  }
+
   private let maxDuration: TimeInterval
   /// Invoked (on ReplayKit's queue) when the capture handler reports an error,
   /// i.e. the capture was interrupted (call/background). Routed to the modifier

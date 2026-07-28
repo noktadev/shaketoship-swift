@@ -70,6 +70,15 @@ struct ShakeRecorderModifier: ViewModifier {
   /// Live Activity handle while recording (iOS 16.2+). Stored as `Any?` to avoid
   /// an availability-annotated stored property; cast at use sites.
   @State private var activityBox: Any?
+  /// #943: the Live Activity request runs off the MainActor now, so its handle
+  /// arrives asynchronously. `liveActivityGeneration` is bumped by every start
+  /// AND every end, so a request whose recording (or capture segment) finished
+  /// while it was still in flight is recognised as orphaned and ended on
+  /// arrival instead of leaking an undismissable banner.
+  @State private var liveActivityGeneration = 0
+  /// True only while a start request is in flight; keeps the fallback recording
+  /// bar from flashing on an island device during that window.
+  @State private var liveActivityPending = false
   /// Active capture time excludes background pauses, preserving the configured
   /// ReplayKit duration cap across any number of resumed segments.
   @State private var capturedDuration: TimeInterval = 0
@@ -124,8 +133,13 @@ struct ShakeRecorderModifier: ViewModifier {
       // like dotself - the app ships no widget target). That guarantees every
       // recording has a visible indicator AND a stop affordance (tap to stop),
       // alongside shake-to-stop and the Live Activity STOP button.
+      //
+      // #943: `liveActivityPending` covers the new window where the request is
+      // still in flight. Without it an island device would show the bar for the
+      // frame or two before the handle lands and then yank it away.
       .overlay(alignment: .top) {
-        if isRecording, !FeedbackDeviceCapability.current || activityBox == nil {
+        if isRecording,
+          !FeedbackDeviceCapability.current || (activityBox == nil && !liveActivityPending) {
           FeedbackRecordingBar { Task { await stopRecording(.user) } }
             .ignoresSafeArea(edges: .top)
         }
@@ -693,14 +707,33 @@ struct ShakeRecorderModifier: ViewModifier {
     return "Couldn't start recording. Please try again."
   }
 
+  /// Requests the Live Activity without blocking the start path (#943). Fire and
+  /// forget: the recording is already live, and the banner is an indicator, not
+  /// a precondition. The generation token makes the late arrival safe - if the
+  /// recording stopped or the segment was replaced while the request was in
+  /// flight, the activity that lands is nobody's and is ended immediately.
   private func startLiveActivity(startedAt: Date, screenCount: Int) {
     #if os(iOS)
     if #available(iOS 16.2, *) {
-      activityBox = FeedbackLiveActivityController.start(
-        startedAt: startedAt, screenCount: screenCount,
-        // #557: a missing banner is now reported instead of silently swallowed,
-        // so the next "not visible for me" report names its own cause.
-        onFailure: { config.onFunnelEvent?(.liveActivityStartFailed(reason: $0.rawValue)) })
+      liveActivityGeneration &+= 1
+      let token = liveActivityGeneration
+      liveActivityPending = true
+      Task { @MainActor in
+        let activity = await FeedbackLiveActivityController.start(
+          startedAt: startedAt, screenCount: screenCount,
+          // #557: a missing banner is now reported instead of silently swallowed,
+          // so the next "not visible for me" report names its own cause.
+          onFailure: { config.onFunnelEvent?(.liveActivityStartFailed(reason: $0.rawValue)) })
+        guard liveActivityGeneration == token else {
+          // A newer start, or an end, superseded this request. Never publish it:
+          // `endLiveActivity` has already run, so storing the handle would strand
+          // a banner whose STOP button routes into a finished recording.
+          if let activity { FeedbackLiveActivityController.end(activity) }
+          return
+        }
+        liveActivityPending = false
+        activityBox = activity
+      }
     }
     #endif
   }
@@ -721,6 +754,12 @@ struct ShakeRecorderModifier: ViewModifier {
       FeedbackLiveActivityController.end(activity)
     }
     #endif
+    // #943: invalidate any request still in flight, so the handle it eventually
+    // returns is ended on arrival rather than published into a stopped
+    // recording. Clearing `pending` here also lets the fallback bar appear for
+    // whatever remains of a capture whose banner never materialised.
+    liveActivityGeneration &+= 1
+    liveActivityPending = false
     activityBox = nil
   }
 
