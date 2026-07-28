@@ -28,7 +28,8 @@ final class FeedbackReviewWindowPresenter {
   func present(
     data: FeedbackReviewData,
     onUpload: @escaping () -> Void,
-    onDiscard: @escaping () -> Void
+    onDiscard: @escaping () -> Void,
+    onOptOut: (@MainActor @Sendable () -> Void)? = nil
   ) -> Bool {
     guard window == nil else { return false }
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -51,6 +52,12 @@ final class FeedbackReviewWindowPresenter {
         onDiscard: { [weak self] in
           self?.dismiss()
           onDiscard()
+        },
+        onOptOut: onOptOut.map { optOut in
+          { [weak self] in
+            self?.dismiss()
+            optOut()
+          }
         }))
     window.isHidden = false  // NOT makeKeyAndVisible() - see type comment.
     self.window = window

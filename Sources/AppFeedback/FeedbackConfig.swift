@@ -21,6 +21,16 @@ public struct FeedbackConfig: Sendable {
   /// app maps it onto its analytics client. Nil = no emission (today's default,
   /// and the only possibility inside an extension that never builds a config).
   public let onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)?
+
+  /// Optional "stop sending feedback" action offered on the review sheet.
+  ///
+  /// `nil` (the default, and what every app but Lock In Chinese passes) renders
+  /// no such action at all - the sheet is byte-for-byte what it was. Lock In
+  /// Chinese collapsed its two Settings feedback rows into one and needs
+  /// opt-out to live somewhere the learner already is; without a home, a
+  /// TestFlight tester seeded opt-in ON would have no way to stop
+  /// shake-to-record.
+  public let onOptOut: (@MainActor @Sendable () -> Void)?
   /// Optional stable reporter identity (an account/user id). When nil the SDK
   /// uses a generated per-install anonymous ref (see `FeedbackUserRef`), so
   /// resolved-issue notifications can find their way back to this device
@@ -33,6 +43,7 @@ public struct FeedbackConfig: Sendable {
     secret: String,
     maxDuration: TimeInterval = FeedbackConfig.defaultMaxDuration,
     onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)? = nil,
+    onOptOut: (@MainActor @Sendable () -> Void)? = nil,
     userRef: String? = nil
   ) {
     self.app = app
@@ -40,6 +51,7 @@ public struct FeedbackConfig: Sendable {
     self.secret = secret
     self.maxDuration = maxDuration
     self.onFunnelEvent = onFunnelEvent
+    self.onOptOut = onOptOut
     self.userRef = userRef
   }
 }

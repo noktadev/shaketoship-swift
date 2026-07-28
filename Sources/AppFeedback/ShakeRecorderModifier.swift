@@ -499,7 +499,8 @@ struct ShakeRecorderModifier: ViewModifier {
           _ = reviewPresenter.present(
             data: data,
             onUpload: { Task { await confirmUpload(data) } },
-            onDiscard: { discard(data) })
+            onDiscard: { discard(data) },
+            onOptOut: config.onOptOut)
         }
       } catch FeedbackRecorderError.emptyRecording {
         // Nothing captured (immediate stop / interruption before first frame):
@@ -654,7 +655,8 @@ struct ShakeRecorderModifier: ViewModifier {
         let presented = reviewPresenter.present(
           data: offer,
           onUpload: { Task { await confirmUpload(offer) } },
-          onDiscard: { discard(offer) })
+          onDiscard: { discard(offer) },
+          onOptOut: config.onOptOut)
         pendingInterruptedOffer = !presented
       }
     }

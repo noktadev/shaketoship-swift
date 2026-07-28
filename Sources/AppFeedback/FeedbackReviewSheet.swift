@@ -28,6 +28,8 @@ struct FeedbackReviewSheet: View {
   let data: FeedbackReviewData
   let onUpload: () -> Void
   let onDiscard: () -> Void
+  /// nil -> not rendered. See `FeedbackConfig.onOptOut`.
+  let onOptOut: (() -> Void)?
 
   /// True once Upload or Discard has fired. Disables both buttons: a second tap
   /// must never double-PUT the session or delete the dir during its upload.
@@ -47,11 +49,13 @@ struct FeedbackReviewSheet: View {
   init(
     data: FeedbackReviewData,
     onUpload: @escaping () -> Void,
-    onDiscard: @escaping () -> Void
+    onDiscard: @escaping () -> Void,
+    onOptOut: (() -> Void)? = nil
   ) {
     self.data = data
     self.onUpload = onUpload
     self.onDiscard = onDiscard
+    self.onOptOut = onOptOut
     self.player = AVPlayer(url: data.movURL)
   }
 
@@ -113,7 +117,23 @@ struct FeedbackReviewSheet: View {
         .buttonStyle(.borderedProminent)
         .disabled(acted)
       }
-      .padding(16)
+      .padding(.horizontal, 16)
+      .padding(.top, 16)
+
+      if let onOptOut {
+        // Deliberately below and quieter than Discard/Upload: this is not a
+        // decision about THIS recording, it is a decision about the feature.
+        Button(role: .destructive) { act(onOptOut) } label: {
+          Text("Stop sending feedback")
+            .font(.footnote)
+        }
+        .buttonStyle(.plain)
+        .disabled(acted)
+        .padding(.top, 12)
+        .padding(.bottom, 16)
+      } else {
+        Color.clear.frame(height: 16)
+      }
     }
     .onAppear { player.play() }
     .onDisappear { player.pause() }
