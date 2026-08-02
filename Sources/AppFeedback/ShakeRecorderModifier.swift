@@ -62,6 +62,12 @@ struct ShakeRecorderModifier: ViewModifier {
   /// Auto-dismissing upload-result toast; nil = hidden. Cancellable dismiss timer.
   @State private var hud: FeedbackHUDState?
   @State private var hudTask: Task<Void, Never>?
+  /// "Shake again to stop" hint (#1092), shown the moment a recording starts
+  /// and auto-cleared after `FeedbackShakeHintGate.visibleDuration` or the
+  /// instant recording stops - see `FeedbackShakeHintGate` for the pure
+  /// show/clear decision this state var only tracks the result of.
+  @State private var shakeStopHintVisible = false
+  @State private var shakeStopHintTask: Task<Void, Never>?
   /// True while a start or a stop/finalize/upload is in flight. Rejects a new
   /// start so a slow upload's epilogue cannot clobber a fresh recording.
   @State private var busy = false
@@ -122,24 +128,27 @@ struct ShakeRecorderModifier: ViewModifier {
     }
   }
 
+  /// #474: island-first. An island device relies on the Live Activity as the
+  /// SOLE in-app indicator (no bar) - but ONLY while that Live Activity is
+  /// actually running. Show the slim top bar whenever the device has no
+  /// island OR no Live Activity is live (`activityBox == nil`: the user has
+  /// Live Activities disabled, the request failed, the OS predates them, or -
+  /// like dotself - the app ships no widget target). That guarantees every
+  /// recording has a visible indicator AND a stop affordance (tap to stop),
+  /// alongside shake-to-stop and the Live Activity STOP button.
+  ///
+  /// #943: `liveActivityPending` covers the new window where the request is
+  /// still in flight. Without it an island device would show the bar for the
+  /// frame or two before the handle lands and then yank it away.
+  private var recordingBarVisible: Bool {
+    isRecording && (!FeedbackDeviceCapability.current || (activityBox == nil && !liveActivityPending))
+  }
+
   func body(content: Content) -> some View {
     content
       .background(ShakeDetector { handleShake() })
-      // #474: island-first. An island device relies on the Live Activity as the
-      // SOLE in-app indicator (no bar) - but ONLY while that Live Activity is
-      // actually running. Show the slim top bar whenever the device has no
-      // island OR no Live Activity is live (`activityBox == nil`: the user has
-      // Live Activities disabled, the request failed, the OS predates them, or -
-      // like dotself - the app ships no widget target). That guarantees every
-      // recording has a visible indicator AND a stop affordance (tap to stop),
-      // alongside shake-to-stop and the Live Activity STOP button.
-      //
-      // #943: `liveActivityPending` covers the new window where the request is
-      // still in flight. Without it an island device would show the bar for the
-      // frame or two before the handle lands and then yank it away.
       .overlay(alignment: .top) {
-        if isRecording,
-          !FeedbackDeviceCapability.current || (activityBox == nil && !liveActivityPending) {
+        if recordingBarVisible {
           FeedbackRecordingBar { Task { await stopRecording(.user) } }
             .ignoresSafeArea(edges: .top)
         }
@@ -148,6 +157,21 @@ struct ShakeRecorderModifier: ViewModifier {
       // devices and never at the same moment as a post-upload toast.
       .overlay(alignment: .top) {
         if let hud { FeedbackToast(state: hud).padding(.top, 8) }
+      }
+      // #1092: transient "shake again to stop" hint, near the recording
+      // indicator. Non-blocking - no buttons, `allowsHitTesting(false)` so
+      // taps always reach the app below - and auto-dismisses on its own
+      // timer (`FeedbackShakeHintGate`). Sits lower when the recording bar is
+      // showing so it reads as attached to that indicator rather than
+      // overlapping it; on island devices (bar hidden, Live Activity is the
+      // indicator) it sits just under the status bar instead.
+      .overlay(alignment: .top) {
+        if isRecording, shakeStopHintVisible {
+          FeedbackShakeStopHint()
+            .padding(.top, recordingBarVisible ? 56 : 8)
+            .allowsHitTesting(false)
+            .animation(.easeInOut(duration: 0.2), value: shakeStopHintVisible)
+        }
       }
       .sheet(isPresented: $showConfirm, onDismiss: resolvePrompt) {
         FeedbackPromptSheet(
@@ -313,6 +337,7 @@ struct ShakeRecorderModifier: ViewModifier {
       captureSegmentStartedAt = ProcessInfo.processInfo.systemUptime
       config.onFunnelEvent?(.recordingStarted)
       FeedbackHaptics.impact()
+      showShakeStopHint()
       startLiveActivity(startedAt: Date(), screenCount: seeded)
       // Stop from the Live Activity STOP button (intent runs in-process): route
       // to the normal user-stop path. The handler is async so `signal()` (and
@@ -351,6 +376,7 @@ struct ShakeRecorderModifier: ViewModifier {
     guard !busy, isRecording, let lifecycle = recordingSession, let id = sessionId else { return }
     busy = true
     isRecording = false
+    hideShakeStopHint()
     accumulateCaptureDuration()
     capTask?.cancel()
     capTask = nil
@@ -437,6 +463,7 @@ struct ShakeRecorderModifier: ViewModifier {
     sessionId = nil
     if isRecording { accumulateCaptureDuration() }
     isRecording = false
+    hideShakeStopHint()
     busy = true
 
     let duration = capturedDuration
@@ -809,6 +836,34 @@ struct ShakeRecorderModifier: ViewModifier {
       try? await Task.sleep(nanoseconds: 2_500_000_000)
       if !Task.isCancelled { hud = nil }
     }
+  }
+
+  /// Shows the "shake again to stop" hint (#1092) and arms its auto-dismiss.
+  /// Called right after a start succeeds; `hideShakeStopHint` (called from
+  /// every stop/pause path) always wins if it races the timer, matching
+  /// `FeedbackShakeHintGate`'s "stop always clears" rule.
+  private func showShakeStopHint() {
+    shakeStopHintVisible = FeedbackShakeHintGate.reduce(
+      isVisible: shakeStopHintVisible, event: .recordingStarted)
+    shakeStopHintTask?.cancel()
+    shakeStopHintTask = Task {
+      let nanoseconds = UInt64(FeedbackShakeHintGate.visibleDuration * 1_000_000_000)
+      try? await Task.sleep(nanoseconds: nanoseconds)
+      if !Task.isCancelled {
+        shakeStopHintVisible = FeedbackShakeHintGate.reduce(
+          isVisible: shakeStopHintVisible, event: .timerElapsed)
+      }
+    }
+  }
+
+  /// Clears the "shake again to stop" hint immediately - called from every
+  /// path where recording stops (user/cap/interruption stop, or a pause),
+  /// so the hint never outlives an active capture.
+  private func hideShakeStopHint() {
+    shakeStopHintTask?.cancel()
+    shakeStopHintTask = nil
+    shakeStopHintVisible = FeedbackShakeHintGate.reduce(
+      isVisible: shakeStopHintVisible, event: .recordingStopped)
   }
 
   /// Runs `work` while holding a UIKit background-task assertion so a
