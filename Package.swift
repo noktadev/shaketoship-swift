@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-  name: "AppFeedback",
+  name: "ShakeToShip",
   platforms: [.iOS(.v17), .macOS(.v14)],
-  products: [.library(name: "AppFeedback", targets: ["AppFeedback"])],
+  products: [.library(name: "ShakeToShip", targets: ["ShakeToShip"])],
   targets: [
-    .target(name: "AppFeedback"),
-    .testTarget(name: "AppFeedbackTests", dependencies: ["AppFeedback"]),
+    .target(name: "ShakeToShip"),
+    .testTarget(name: "ShakeToShipTests", dependencies: ["ShakeToShip"]),
   ]
 )
