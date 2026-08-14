@@ -6,7 +6,10 @@ let package = Package(
   platforms: [.iOS(.v17), .macOS(.v14)],
   products: [.library(name: "ShakeToShip", targets: ["ShakeToShip"])],
   targets: [
-    .target(name: "ShakeToShip"),
+    .target(
+      name: "ShakeToShip",
+      resources: [.process("PrivacyInfo.xcprivacy")]
+    ),
     .testTarget(name: "ShakeToShipTests", dependencies: ["ShakeToShip"]),
   ]
 )
