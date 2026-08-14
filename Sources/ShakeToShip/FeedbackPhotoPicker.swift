@@ -66,6 +66,17 @@ struct FeedbackPhotoPicker: UIViewControllerRepresentable {
         parent.onFinish(.empty)
         return
       }
+      // `sending`, because `NSItemProvider` is not Sendable and `ingest` is
+      // nonisolated: handing it the array crosses an isolation boundary. The
+      // array is built fresh here and read nowhere else afterwards, so the
+      // transfer is genuinely exclusive and `sending` states that rather than
+      // suppressing it.
+      //
+      // Xcode 26.3 accepts this without the annotation; the toolchain Xcode
+      // Cloud tracks as "Latest Release" does not, and failed every archive
+      // from 2026-08-14 with "Sending 'providers' risks causing data races" -
+      // including builds whose commits changed nothing here. It is a real
+      // boundary either way, so it is annotated rather than pinned around.
       let providers = results.map(\.itemProvider)
       let parent = parent
       Task { @MainActor in
@@ -89,7 +100,7 @@ struct FeedbackPhotoPicker: UIViewControllerRepresentable {
 /// rather than left in the session dir where the uploader would find it.
 enum FeedbackAttachmentIntake {
   static func ingest(
-    providers: [NSItemProvider],
+    providers: sending [NSItemProvider],
     stagingDirectory: URL,
     maxAttachmentDuration: TimeInterval,
     existingCount: Int,
