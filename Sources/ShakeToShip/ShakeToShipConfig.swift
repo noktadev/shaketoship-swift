@@ -17,9 +17,23 @@ extension ShakeToShipConfig {
     public static let photoLibrary = Capabilities(rawValue: 1 << 2)
     /// Permits free-text notes on a report.
     public static let text = Capabilities(rawValue: 1 << 3)
-    /// Every capability. Today's behavior for the two internal apps that do
-    /// not pass `capabilities` explicitly.
+    /// Every capability. The two internal apps pass this explicitly to keep
+    /// today's behavior, which includes the microphone.
     public static let all: Capabilities = [.screenRecording, .microphone, .photoLibrary, .text]
+    /// Every capability except the microphone. The default ceiling: the
+    /// microphone is the only bit here that triggers an OS permission prompt,
+    /// that can terminate the host app outright when its Info.plist is
+    /// missing `NSMicrophoneUsageDescription`, and that captures the user's
+    /// surroundings rather than their screen. None of that risk buys a silent
+    /// default anything - in-app ReplayKit capture needs no entitlement and no
+    /// plist key, `PHPickerViewController` runs out of process and needs no
+    /// photo permission, and text needs nothing. So a host that installs this
+    /// SDK and passes no `capabilities` still gets a fully working feedback
+    /// flow, just one that cannot record audio. This is deliberately not `[]`:
+    /// an empty ceiling is this SDK's defined "deliberately off" state
+    /// (`FeedbackGate.shouldAttach` returns false for it), and a host that
+    /// installed the SDK on purpose should not silently get nothing.
+    public static let microphoneFree: Capabilities = [.screenRecording, .photoLibrary, .text]
   }
 }
 
@@ -41,8 +55,8 @@ public struct ShakeToShipConfig: Sendable {
   public let collectorURL: URL
   /// Shared secret sent as the `x-feedback-secret` header.
   public let secret: String
-  /// The host app's privacy ceiling. Defaults to `.all`, preserving today's
-  /// behavior for call sites that predate this property.
+  /// The host app's privacy ceiling. Defaults to `.microphoneFree` - a third
+  /// party that omits this parameter must not inherit a microphone.
   public let capabilities: Capabilities
   /// Whether the collector should transcribe the recording's audio. Purely a
   /// server-side storage request - it never changes what the SDK captures
@@ -80,7 +94,7 @@ public struct ShakeToShipConfig: Sendable {
     app: String,
     collectorURL: URL,
     secret: String,
-    capabilities: Capabilities = .all,
+    capabilities: Capabilities = .microphoneFree,
     transcription: Bool = true,
     maxAttachmentDuration: TimeInterval = ShakeToShipConfig.defaultMaxDuration,
     maxDuration: TimeInterval = ShakeToShipConfig.defaultMaxDuration,
@@ -98,5 +112,38 @@ public struct ShakeToShipConfig: Sendable {
     self.onFunnelEvent = onFunnelEvent
     self.onOptOut = onOptOut
     self.userRef = userRef
+  }
+}
+
+extension ShakeToShipConfig {
+  /// Returns a copy with new callbacks, preserving every other field -
+  /// including `capabilities`. Rebuilding a config field by field, as a
+  /// caller could do by writing out `ShakeToShipConfig(...)` again, is how a
+  /// narrowed ceiling silently widens back out: a field added to this type
+  /// later is simply absent from that rebuild, and the code still compiles.
+  /// This helper keeps the field list in one place, in the type's own file,
+  /// next to the properties it must track, so a new field is copied by
+  /// construction instead of by whoever remembers to update every call site.
+  ///
+  /// Both callbacks are replaced wholesale, not merged with what the config
+  /// already carries - so both are required. A default of `nil` on either
+  /// would let a caller that means to set one silently clear the other, which
+  /// is the exact silent-drop bug this helper exists to prevent.
+  public func with(
+    onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)?,
+    onOptOut: (@MainActor @Sendable () -> Void)?
+  ) -> ShakeToShipConfig {
+    ShakeToShipConfig(
+      app: app,
+      collectorURL: collectorURL,
+      secret: secret,
+      capabilities: capabilities,
+      transcription: transcription,
+      maxAttachmentDuration: maxAttachmentDuration,
+      maxDuration: maxDuration,
+      onFunnelEvent: onFunnelEvent,
+      onOptOut: onOptOut,
+      userRef: userRef
+    )
   }
 }

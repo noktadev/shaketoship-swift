@@ -29,18 +29,64 @@ import Testing
     #expect(all.contains(.text))
   }
 
+  /// Pins the exact membership, not just the microphone's absence, so a
+  /// regression that also drops `.photoLibrary` or `.text` from the default
+  /// ceiling fails here instead of passing silently.
+  @Test func microphoneFreeIsExactlyScreenRecordingPhotoLibraryAndText() {
+    #expect(
+      ShakeToShipConfig.Capabilities.microphoneFree
+        == [.screenRecording, .photoLibrary, .text])
+  }
+
   /// The top-level spelling in the chunk plan and the nested spelling in the
   /// design doc must denote one type, so chunks G and H compile either way.
   @Test func topLevelSpellingIsTheSameType() {
     #expect(Capabilities.all == ShakeToShipConfig.Capabilities.all)
   }
 
-  @Test func defaultsPreserveTodaysBehavior() {
+  @Test func defaultCeilingFailsClosedOnTheMicrophone() {
     let config = ShakeToShipConfig(
       app: "test", collectorURL: URL(string: "https://example.com")!, secret: "s")
-    #expect(config.capabilities == .all)
+    #expect(config.capabilities.contains(.microphone) == false)
     #expect(config.transcription == true)
     #expect(config.maxAttachmentDuration == 300)
+  }
+
+  /// The default ceiling must be safe (no microphone) without being inert: a
+  /// host that installs the SDK and passes nothing still gets a working
+  /// screen-recording feedback flow.
+  @Test func defaultConfigCapturesNoMicrophoneButStillAttachesAndRecords() {
+    let config = ShakeToShipConfig(
+      app: "test", collectorURL: URL(string: "https://example.com")!, secret: "s")
+    #expect(FeedbackGate.capturePlan(for: config).capturesMicrophone == false)
+    #expect(FeedbackGate.shouldAttach(config: config) == true)
+    #expect(FeedbackGate.capturePlan(for: config).startsScreenCapture == true)
+  }
+
+  /// Regression guard for the field-by-field config rebuild bug: `with(
+  /// onFunnelEvent:onOptOut:)` must preserve a narrowed ceiling and every
+  /// other field, not just the ones a rebuild happened to copy. Both
+  /// callbacks passed in must also land on the copy - `with` replaces them
+  /// wholesale, so a caller that supplies one must not silently lose the
+  /// other.
+  @Test func withPreservesANarrowedCeilingAndEveryOtherFieldAndBothCallbacks() {
+    let original = ShakeToShipConfig(
+      app: "test-app", collectorURL: URL(string: "https://example.com")!, secret: "s3cr3t",
+      capabilities: [.text], transcription: false, maxAttachmentDuration: 42,
+      maxDuration: 99, userRef: "user-123")
+
+    let copy = original.with(onFunnelEvent: { _ in }, onOptOut: {})
+
+    #expect(copy.capabilities == [.text])
+    #expect(copy.transcription == false)
+    #expect(copy.maxAttachmentDuration == 42)
+    #expect(copy.app == "test-app")
+    #expect(copy.collectorURL == URL(string: "https://example.com")!)
+    #expect(copy.secret == "s3cr3t")
+    #expect(copy.maxDuration == 99)
+    #expect(copy.userRef == "user-123")
+    #expect(copy.onFunnelEvent != nil)
+    #expect(copy.onOptOut != nil)
   }
 
   /// Rule 4: one inertness rule, not two. An empty ceiling attaches nothing,
