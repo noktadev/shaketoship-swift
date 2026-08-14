@@ -4,7 +4,7 @@ import UIKit
 
 #if !targetEnvironment(simulator) && !targetEnvironment(macCatalyst)
 
-/// Presents `FeedbackReviewSheet` in a dedicated overlay UIWindow so it can
+/// Presents `FeedbackComposer` in a dedicated overlay UIWindow so it can
 /// never collide with a host app's own fullScreenCover/sheet presentations
 /// (#406: dotself's root already owns covers + sheets, which suppressed the
 /// modifier's `fullScreenCover`). The window is deliberately NOT made key:
@@ -26,8 +26,8 @@ final class FeedbackReviewWindowPresenter {
   /// the caller leaves the session unconfirmed in the outbox, mirroring the
   /// interruption path.
   func present(
-    data: FeedbackReviewData,
-    onUpload: @escaping () -> Void,
+    data: FeedbackComposerData,
+    onSend: @escaping (FeedbackComposerResult) -> Void,
     onDiscard: @escaping () -> Void,
     onOptOut: (@MainActor @Sendable () -> Void)? = nil
   ) -> Bool {
@@ -43,11 +43,11 @@ final class FeedbackReviewWindowPresenter {
     // holds the window on screen (same ordering as the old cover's
     // `reviewSession = nil` first line).
     window.rootViewController = UIHostingController(
-      rootView: FeedbackReviewSheet(
+      rootView: FeedbackComposer(
         data: data,
-        onUpload: { [weak self] in
+        onSend: { [weak self] result in
           self?.dismiss()
-          onUpload()
+          onSend(result)
         },
         onDiscard: { [weak self] in
           self?.dismiss()

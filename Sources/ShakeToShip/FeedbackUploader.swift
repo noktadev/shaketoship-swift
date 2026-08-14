@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// Injectable HTTP seam so presign/upload logic is unit testable without network.
@@ -37,14 +38,15 @@ public enum FeedbackUploadError: Error {
   case missingPresignedURL(String)
 }
 
-/// The original capture files. Additional segments use
-/// `recording-NNN.mov` and are discovered with a strict filename check.
-let feedbackFileNames = ["recording.mov", "events.json"]
+/// Completion object uploaded only after every evidence file reaches storage.
+private let feedbackCompletionFile = "complete.json"
+private let feedbackCompletionBody = Data(#"{"version":1}"#.utf8)
+private let feedbackUploadManifestFile = ".upload-manifest.json"
+private let shakeToShipSDKVersion = "2.0.0"
 
 /// Local confirmation marker written into a session dir when the user taps
-/// Upload in the review sheet. NEVER uploaded - kept out of `feedbackFileNames`
-/// so it is never presigned/PUT - it only tells the launch sweep this session
-/// was user-confirmed and may be flushed.
+/// Upload in the review sheet. NEVER uploaded - the evidence plan does not
+/// include it. It only tells the launch sweep this session was user-confirmed.
 public let feedbackConfirmedMarker = ".confirmed"
 
 /// Writes the user-confirmation marker into `dir`, retrying ONCE on failure.
@@ -64,10 +66,8 @@ func writeFeedbackConfirmedMarker(
 
 /// Marker written into a session dir when a recording is finalized after a
 /// backgrounding interruption (#472). Like `.confirmed` it is NEVER uploaded
-/// (not in `feedbackFileNames`), and it does NOT gate the launch sweep - it only
-/// tags the finalized-but-unconfirmed partial so the next foreground can OFFER
-/// to send it. An interrupted session the user never re-confirms is still purged
-/// once stale, exactly like any other unconfirmed dir.
+/// because the evidence plan does not include it. It does NOT gate the launch
+/// sweep. It tags the partial so the next foreground can offer to send it.
 public let feedbackInterruptedMarker = ".interrupted"
 
 /// Writes the interruption marker into `dir` (retries once). See
@@ -179,8 +179,8 @@ public struct OutboxSweepResult: Sendable, Equatable {
 }
 
 /// Presigns and uploads a session's files to R2 via the collector worker, then
-/// deletes the local session dir on full success. Failures leave files in the
-/// outbox for `retryOutbox()` to sweep on the next launch.
+/// deletes the local session dir on full success. Each successful PUT removes
+/// its local file, so `retryOutbox()` sends only work that remains.
 public struct FeedbackUploader {
   private let config: ShakeToShipConfig
   private let transport: FeedbackTransport
@@ -205,6 +205,25 @@ public struct FeedbackUploader {
     let sessionId: String
     let files: [String]
     let userRef: String?
+    let startedAt: String
+    let appBundleId: String
+    let sdkVersion: String
+    let hasNarration: Bool
+    let hasAppAudio: Bool
+    let capSeconds: TimeInterval
+    let state: String
+    let transcribe: Bool
+  }
+
+  private struct PresignManifest: Codable {
+    let startedAt: String
+    let appBundleId: String
+    let sdkVersion: String
+    let hasNarration: Bool
+    let hasAppAudio: Bool
+    let capSeconds: TimeInterval
+    let state: String
+    let transcribe: Bool
   }
 
   private struct PresignResponse: Decodable {
@@ -215,24 +234,29 @@ public struct FeedbackUploader {
   /// files that actually exist on disk (a dir missing one file still uploads the
   /// other instead of retrying forever). Returns true only when every uploaded
   /// file reached R2 AND the local dir was successfully removed; false on any
-  /// upload OR deletion failure (files retained is then the honest state).
+  /// upload OR deletion failure.
   @discardableResult
   public func flush(sessionId: String) async -> Bool {
     let dir = outboxRoot.appendingPathComponent(sessionId, isDirectory: true)
-    let present = existingFiles(in: dir)
-    guard !present.isEmpty else { return false }
+    guard let present = existingFiles(in: dir) else { return false }
+    let completionURL = dir.appendingPathComponent(feedbackCompletionFile)
+    let completionPending = fileManager.fileExists(atPath: completionURL.path)
+    guard !present.isEmpty || completionPending else { return false }
     do {
-      let urls = try await presign(sessionId: sessionId, files: present)
-      for name in present {
-        guard let putURLString = urls[name], let putURL = URL(string: putURLString) else {
-          throw FeedbackUploadError.missingPresignedURL(name)
-        }
-        var req = URLRequest(url: putURL)
-        req.httpMethod = "PUT"
-        let (_, resp) = try await transport.upload(
-          req, fromFile: dir.appendingPathComponent(name))
-        guard resp.statusCode == 200 else { return false }
+      let manifest = try await persistedManifest(in: dir, files: present)
+      if !completionPending {
+        try feedbackCompletionBody.write(to: completionURL, options: .atomic)
       }
+      let urls = try await presign(
+        sessionId: sessionId,
+        files: present + [feedbackCompletionFile],
+        manifest: manifest)
+      for name in present {
+        guard try await upload(name, from: dir, urls: urls) else { return false }
+        try fileManager.removeItem(at: dir.appendingPathComponent(name))
+      }
+      guard try await upload(feedbackCompletionFile, from: dir, urls: urls) else { return false }
+      try fileManager.removeItem(at: completionURL)
       try fileManager.removeItem(at: dir)
       return true
     } catch {
@@ -240,17 +264,55 @@ public struct FeedbackUploader {
     }
   }
 
-  /// Whitelisted files that actually exist in `dir`, in capture order followed
-  /// by the JSON sidecar. Marker and arbitrary files never leave the device.
-  private func existingFiles(in dir: URL) -> [String] {
+  /// Evidence files that exist in `dir`, in deterministic upload order.
+  /// Returns nil when one attachment index has conflicting extensions.
+  private func existingFiles(in dir: URL) -> [String]? {
     let entries =
       (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
     let additionalSegments = entries.map(\.lastPathComponent)
       .filter(Self.isAdditionalSegment)
       .sorted()
-    return (["recording.mov"] + additionalSegments + ["events.json"]).filter {
-      fileManager.fileExists(atPath: dir.appendingPathComponent($0).path)
+    var evidence = ["events.json", FeedbackAttachmentNaming.recordingFile] + additionalSegments
+    if hasNonBlankNote(in: dir) {
+      evidence.append(FeedbackAttachmentNaming.noteFile)
     }
+    guard let attachments = attachmentFiles(in: dir) else { return nil }
+    evidence += attachments
+    return evidence.filter { fileManager.fileExists(atPath: dir.appendingPathComponent($0).path) }
+  }
+
+  private func hasNonBlankNote(in dir: URL) -> Bool {
+    let url = dir.appendingPathComponent(FeedbackAttachmentNaming.noteFile)
+    guard let data = try? Data(contentsOf: url) else { return false }
+    return FeedbackComposerRules.noteFileContents(note: String(decoding: data, as: UTF8.self)) != nil
+  }
+
+  /// Picked files in composer order. The naming module owns every wire name.
+  /// Two extensions for one index fail before any presign request.
+  private func attachmentFiles(in dir: URL) -> [String]? {
+    var files: [String] = []
+    for index in 0..<FeedbackAttachmentBounds.maxItems {
+      let present = [FeedbackMediaKind.image, .video]
+        .map { FeedbackAttachmentNaming.attachmentFile(index: index, kind: $0) }
+        .filter { fileManager.fileExists(atPath: dir.appendingPathComponent($0).path) }
+      guard present.count <= 1 else { return nil }
+      files += present
+    }
+    return files
+  }
+
+  private func upload(_ name: String, from dir: URL, urls: [String: String]) async throws -> Bool {
+    guard let putURLString = urls[name], let putURL = URL(string: putURLString) else {
+      throw FeedbackUploadError.missingPresignedURL(name)
+    }
+    var req = URLRequest(url: putURL)
+    req.httpMethod = "PUT"
+    if name == feedbackCompletionFile {
+      req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    }
+    let (_, response) = try await transport.upload(
+      req, fromFile: dir.appendingPathComponent(name))
+    return response.statusCode == 200
   }
 
   private static func isAdditionalSegment(_ name: String) -> Bool {
@@ -259,7 +321,9 @@ public struct FeedbackUploader {
     return digits.count == 3 && digits.allSatisfy(\.isNumber) && Int(digits).map { $0 >= 2 } == true
   }
 
-  private func presign(sessionId: String, files: [String]) async throws -> [String: String] {
+  private func presign(
+    sessionId: String, files: [String], manifest: PresignManifest
+  ) async throws -> [String: String] {
     var req = URLRequest(url: config.collectorURL.appendingPathComponent("presign"))
     req.httpMethod = "POST"
     req.setValue(config.secret, forHTTPHeaderField: "x-feedback-secret")
@@ -267,12 +331,79 @@ public struct FeedbackUploader {
     req.httpBody = try JSONEncoder().encode(
       PresignRequestBody(
         app: config.app, sessionId: sessionId, files: files,
-        userRef: FeedbackUserRef.resolve(configured: config.userRef)))
+        userRef: FeedbackUserRef.resolve(configured: config.userRef),
+        startedAt: manifest.startedAt,
+        appBundleId: manifest.appBundleId,
+        sdkVersion: manifest.sdkVersion,
+        hasNarration: manifest.hasNarration,
+        hasAppAudio: manifest.hasAppAudio,
+        capSeconds: manifest.capSeconds,
+        state: manifest.state,
+        transcribe: manifest.transcribe))
     let (data, resp) = try await transport.perform(req)
     guard resp.statusCode == 200 else {
       throw FeedbackUploadError.missingPresignedURL("presign status \(resp.statusCode)")
     }
     return try JSONDecoder().decode(PresignResponse.self, from: data).urls
+  }
+
+  /// Stores the complete v2 manifest before the first presign. Evidence files
+  /// can then be removed after each successful PUT without weakening a retry.
+  private func persistedManifest(in dir: URL, files: [String]) async throws -> PresignManifest {
+    let persistedURL = dir.appendingPathComponent(feedbackUploadManifestFile)
+    if
+      let data = try? Data(contentsOf: persistedURL),
+      let manifest = try? JSONDecoder().decode(PresignManifest.self, from: data)
+    {
+      return manifest
+    }
+
+    let manifest = await makeManifest(in: dir, files: files)
+    try JSONEncoder().encode(manifest).write(to: persistedURL, options: .atomic)
+    return manifest
+  }
+
+  /// Builds the complete v2 manifest from the session sidecar. A damaged
+  /// legacy outbox still gets a valid manifest with its directory timestamp.
+  private func makeManifest(in dir: URL, files: [String]) async -> PresignManifest {
+    let eventsURL = dir.appendingPathComponent("events.json")
+    let startedAt: String
+    if
+      let data = try? Data(contentsOf: eventsURL),
+      let session = try? JSONDecoder().decode(FeedbackSession.self, from: data),
+      !session.started_at.isEmpty
+    {
+      startedAt = session.started_at
+    } else {
+      let modified =
+        (try? dir.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        ?? Date()
+      startedAt = ISO8601DateFormatter().string(from: modified)
+    }
+
+    let recordingFiles = files.filter {
+      $0 == FeedbackAttachmentNaming.recordingFile || Self.isAdditionalSegment($0)
+    }
+    var hasNarration = false
+    for name in recordingFiles {
+      let asset = AVURLAsset(url: dir.appendingPathComponent(name))
+      if let tracks = try? await asset.load(.tracks),
+        tracks.contains(where: { $0.mediaType == .audio })
+      {
+        hasNarration = true
+        break
+      }
+    }
+
+    return PresignManifest(
+      startedAt: startedAt,
+      appBundleId: config.app,
+      sdkVersion: shakeToShipSDKVersion,
+      hasNarration: hasNarration,
+      hasAppAudio: false,
+      capSeconds: config.maxDuration,
+      state: "finished",
+      transcribe: config.transcription)
   }
 
   /// Sweeps every session dir under the outbox root. Only USER-CONFIRMED dirs
@@ -283,7 +414,7 @@ public struct FeedbackUploader {
   /// files (a crashed session that never wrote a recording) can never upload, so
   /// it too is purged once stale. Empty/unconfirmed dirs are only purged once
   /// older than `purgeAge` - a freshly created dir may belong to a session whose
-  /// writer has not produced its first file yet, and purging it would destroy a
+  /// writer has not produced its first file yet. Purging it would destroy a
   /// live recording.
   /// Safe to call on app launch. Returns the sweep tally for a result HUD.
   ///
@@ -329,7 +460,13 @@ public struct FeedbackUploader {
         purgeIfStale(entry, purgeAge: interruptedRetention, purged: &purged)
         continue
       }
-      if existingFiles(in: entry).isEmpty {
+      let hasPendingCompletion = fileManager.fileExists(
+        atPath: entry.appendingPathComponent(feedbackCompletionFile).path)
+      guard let pendingFiles = existingFiles(in: entry) else {
+        if confirmed { queued += 1 }
+        continue
+      }
+      if pendingFiles.isEmpty, !hasPendingCompletion {
         purgeIfStale(entry, purgeAge: purgeAge, purged: &purged)
         continue
       }

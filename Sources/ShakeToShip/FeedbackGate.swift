@@ -87,7 +87,15 @@ extension FeedbackGate {
 /// "persists per install" by reading it back through a second instance built
 /// on the same suite, the way a relaunched app would.
 public struct FeedbackMicrophonePreference {
-  /// Shared by the recorder's read and the review bar's `@AppStorage` toggle.
+  /// The ONE key this floor lives under. The recorder's read, the recording
+  /// bar's `@AppStorage` toggle and a host app's Settings row all address it,
+  /// which is what makes them one control rather than two that can disagree.
+  ///
+  /// A Settings row exists because the bar is unreachable on a Dynamic Island
+  /// iPhone: there the Live Activity is the sole in-app indicator, so the
+  /// bar - and with it the only mute affordance - is never shown while
+  /// recording. Any such row must bind to THIS key, never to a copy of the
+  /// string and never to a second store.
   public static let storageKey = "shaketoship.microphone.muted"
 
   private let defaults: UserDefaults
@@ -102,10 +110,11 @@ public struct FeedbackMicrophonePreference {
     defaults.bool(forKey: Self.storageKey)
   }
 
-  /// Internal, not public: only the SDK's own control (the recording bar's
-  /// `@AppStorage` toggle) writes the floor. A host app may READ it via
-  /// `isMuted` or bind its own settings row to `storageKey`, but must never
-  /// overwrite the end user's choice, including forcing an unmute.
+  /// Internal, not public: the floor is written by a control the END USER
+  /// operates - the recording bar's `@AppStorage` toggle, or a host Settings
+  /// row bound to `storageKey`, which is the same store by the same person.
+  /// No host code path may set it on the user's behalf, in either direction:
+  /// a programmatic unmute would re-arm a microphone the user turned off.
   func setMuted(_ muted: Bool) {
     defaults.set(muted, forKey: Self.storageKey)
   }

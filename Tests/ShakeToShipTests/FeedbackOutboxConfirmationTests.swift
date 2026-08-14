@@ -12,7 +12,8 @@ import Testing
   }
 
   private func presignBody() -> Data {
-    Data(#"{"urls":{"recording.mov":"https://r2/mov","events.json":"https://r2/json"}}"#.utf8)
+    Data(
+      #"{"urls":{"recording.mov":"https://r2/mov","events.json":"https://r2/json","complete.json":"https://r2/complete"}}"#.utf8)
   }
 
   private func makeRoot() throws -> URL {
@@ -49,6 +50,7 @@ import Testing
     let dir = try makeSession(root, "s1", confirmed: true)
     let t = FakeTransport([
       .init(status: 200, data: presignBody()),
+      .init(status: 200, data: Data()),
       .init(status: 200, data: Data()),
       .init(status: 200, data: Data()),
     ])
@@ -93,6 +95,7 @@ import Testing
       .init(status: 200, data: presignBody()),
       .init(status: 200, data: Data()),
       .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
     ])
 
     _ = await uploader(root, t).flush(sessionId: "s1")
@@ -100,10 +103,10 @@ import Testing
     let presign = try #require(t.requests.first)
     let body = try #require(presign.httpBody)
     let obj = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-    #expect(obj["files"] as? [String] == ["recording.mov", "events.json"])
-    // presign POST + exactly 2 file-streamed PUTs (no PUT for the marker)
+    #expect(obj["files"] as? [String] == ["events.json", "recording.mov", "complete.json"])
+    // Presign POST + evidence and sentinel PUTs. The marker never appears.
     #expect(t.requests.count == 1)
-    #expect(t.uploads.count == 2)
+    #expect(t.uploads.count == 3)
   }
 
   @Test func markerWriteSucceedsAndLandsOnDisk() throws {

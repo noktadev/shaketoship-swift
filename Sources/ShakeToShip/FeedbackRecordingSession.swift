@@ -89,7 +89,7 @@ public actor FeedbackRecordingSession {
   private func startSegment() async throws {
     let name =
       segments.isEmpty
-      ? "recording.mov"
+      ? FeedbackAttachmentNaming.recordingFile
       : String(format: "recording-%03d.mov", segments.count + 1)
     try await capture.start(to: directory.appendingPathComponent(name))
     state = .recording

@@ -114,7 +114,15 @@ struct ShakeRecorderModifier: ViewModifier {
   /// spawn a scan and race to present the same partial twice.
   @State private var offerScanInFlight = false
 
-  private enum PromptOutcome { case pending, record, dismiss }
+  private enum PromptOutcome { case pending, record, write, dismiss }
+
+  /// Whether the composer has anything at all to collect on this host. Drives
+  /// the prompt's Write action and, when there is no Record action either,
+  /// whether a shake does anything at all.
+  private var composerEntryAvailable: Bool {
+    FeedbackComposerRules.showsNoteField(capabilities: config.capabilities)
+      || FeedbackComposerRules.showsAttach(capabilities: config.capabilities, mediaCount: 0)
+  }
 
   private enum StopReason {
     case user, cap, interruption
@@ -177,8 +185,17 @@ struct ShakeRecorderModifier: ViewModifier {
       }
       .sheet(isPresented: $showConfirm, onDismiss: resolvePrompt) {
         FeedbackPromptSheet(
+          // The prompt is only ever reached when this host can record
+          // (`FeedbackComposerRules.shakeDestination`), so Record is always
+          // offered here. Write appears alongside it whenever the composer has
+          // anything to collect.
+          showsWrite: composerEntryAvailable,
           onRecord: {
             promptOutcome = .record
+            showConfirm = false
+          },
+          onWrite: {
+            promptOutcome = .write
             showConfirm = false
           },
           onDismiss: {
@@ -186,7 +203,7 @@ struct ShakeRecorderModifier: ViewModifier {
             showConfirm = false
           }
         )
-        .presentationDetents([.height(240)])
+        .presentationDetents([.height(composerEntryAvailable ? 300 : 240)])
       }
       .alert(
         "Feedback error",
@@ -281,10 +298,27 @@ struct ShakeRecorderModifier: ViewModifier {
     case .stopRecording:
       Task { await stopRecording(.user) }
     case .showPrompt:
-      promptsShown += 1
-      promptOutcome = .pending
-      showConfirm = true
-      config.onFunnelEvent?(.promptShown)
+      // A host that cannot record has nothing to ask about: the prompt exists
+      // to get consent for a capture, so with no capture on offer the shake
+      // opens the composer directly rather than adding a tap that can only
+      // ever mean "Write". A host that can neither record nor compose gets
+      // nothing at all.
+      switch FeedbackComposerRules.shakeDestination(capabilities: config.capabilities) {
+      case .none:
+        break
+      case .prompt:
+        promptsShown += 1
+        promptOutcome = .pending
+        showConfirm = true
+        config.onFunnelEvent?(.promptShown)
+      case .composer:
+        // Counted against the same per-session cap and cooldown: an unasked-for
+        // composer is exactly as much of an interruption as an unasked-for
+        // prompt, and the suppression rules exist for the interruption.
+        promptsShown += 1
+        config.onFunnelEvent?(.promptShown)
+        openComposer()
+      }
     case .ignore:
       break
     }
@@ -298,6 +332,8 @@ struct ShakeRecorderModifier: ViewModifier {
     switch promptOutcome {
     case .record:
       Task { await startRecording() }
+    case .write:
+      openComposer()
     case .dismiss, .pending:
       lastDismissedAt = ProcessInfo.processInfo.systemUptime
       config.onFunnelEvent?(.promptDismissed)
@@ -535,14 +571,14 @@ struct ShakeRecorderModifier: ViewModifier {
           // the previous fullScreenCover on dotself (#406). When no scene is
           // available (backgrounded stop), the session stays finalized but
           // UNCONFIRMED in the outbox, exactly like the interruption path above.
-          let data = FeedbackReviewData(
+          let data = composerData(
             id: id,
-            movURL: outDir.appendingPathComponent(firstSegment.file),
             dir: outDir,
-            events: session.events)
+            events: session.events,
+            recorded: outDir.appendingPathComponent(firstSegment.file))
           _ = reviewPresenter.present(
             data: data,
-            onUpload: { Task { await confirmUpload(data) } },
+            onSend: { result in Task { await send(data, result) } },
             onDiscard: { discard(data) },
             onOptOut: config.onOptOut)
         }
@@ -582,14 +618,97 @@ struct ShakeRecorderModifier: ViewModifier {
     }
   }
 
-  /// Review-sheet Upload: mark the session user-confirmed, then flush. The
+  /// Opens the composer with no recording - the Write entry point, reached
+  /// from the prompt's Write action or directly from a shake on a host that
+  /// cannot record. The session dir and the trail are created here exactly as
+  /// `startRecording` creates them, so a written report is an ordinary outbox
+  /// session that Send confirms and Discard deletes.
+  private func openComposer() {
+    guard recordingSession == nil, !isRecording, !busy, !reviewPresenter.isPresenting else {
+      return
+    }
+    let id = UUID().uuidString
+    let dir = outboxRoot().appendingPathComponent(id, isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    Feedback.shared.startSession(
+      sessionId: id, app: config.app, build: buildNumber(), startedAt: iso8601Now(),
+      userRef: FeedbackUserRef.resolve(configured: config.userRef))
+    let data = composerData(id: id, dir: dir, events: Feedback.shared.snapshot().events)
+    let presented = reviewPresenter.present(
+      data: data,
+      onSend: { result in Task { await send(data, result) } },
+      onDiscard: { discard(data) },
+      // Opting out abandons this draft: close the trail this composer opened
+      // and take the empty dir with it. Left alone, the trail would keep
+      // appending every screen change for the rest of the app's life to a
+      // session nothing will ever send.
+      onOptOut: config.onOptOut.map { optOut in
+        { @MainActor @Sendable in
+          _ = Feedback.shared.stop()
+          try? FileManager.default.removeItem(at: dir)
+          optOut()
+        }
+      })
+    if !presented {
+      // No scene to present into. Leave nothing behind: an empty dir with no
+      // events.json is not a report, and the trail must not stay open.
+      _ = Feedback.shared.stop()
+      try? FileManager.default.removeItem(at: dir)
+    }
+  }
+
+  /// One place that stamps the host's ceiling and attachment bound onto every
+  /// composer, whichever entry point opened it.
+  private func composerData(
+    id: String, dir: URL, events: [FeedbackEvent], recorded: URL? = nil, contextNote: String? = nil
+  ) -> FeedbackComposerData {
+    FeedbackComposerData(
+      id: id, dir: dir, events: events, recorded: recorded, contextNote: contextNote,
+      capabilities: config.capabilities, maxAttachmentDuration: config.maxAttachmentDuration)
+  }
+
+  /// Composer Send: write what the user composed into the session dir, then
+  /// confirm and flush it. The note and the attachments land on disk BEFORE
+  /// the confirm marker, so a session the sweep later retries carries the same
+  /// files this send did - never a recording stripped of the note that
+  /// explained it.
+  private func send(_ data: FeedbackComposerData, _ result: FeedbackComposerResult) async {
+    ensureEventsFile(for: data)
+    let persisted = persistComposedReport(result, in: data.dir)
+    // Staging held the picker's copies; the `attachment-N` files are the real
+    // ones from here, and the uploader must not find two of each.
+    try? FileManager.default.removeItem(at: data.stagingDirectory)
+    if !persisted {
+      errorMessage = "Some of what you attached couldn't be saved. Sending the rest."
+    }
+    await confirmUpload(data)
+  }
+
+  /// A written report has no `events.json` yet - `stopRecording` writes it for
+  /// a recorded one. Assembles it from the live trail and closes that trail.
+  private func ensureEventsFile(for data: FeedbackComposerData) {
+    let url = data.dir.appendingPathComponent("events.json")
+    guard !FileManager.default.fileExists(atPath: url.path) else { return }
+    let trail = Feedback.shared.stop()
+    let session = FeedbackSession(
+      session_id: data.id,
+      app: config.app,
+      build: buildNumber(),
+      started_at: trail.started_at.isEmpty ? iso8601Now() : trail.started_at,
+      user_ref: FeedbackUserRef.resolve(configured: config.userRef),
+      events: trail.events)
+    guard let encoded = try? JSONEncoder().encode(session) else { return }
+    try? encoded.write(to: url)
+  }
+
+  /// Composer Send: mark the session user-confirmed, then flush. The
   /// `.confirmed` marker is written BEFORE the flush so a crash/kill mid-upload
   /// still lets the launch sweep retry (the marker gates the sweep).
   ///
   /// If the marker cannot be written (retried once), the upload still runs, but
   /// a failure is then terminal for this launch: the sweep would purge the
   /// unmarked dir once stale, so the toast must NOT promise a retry.
-  private func confirmUpload(_ data: FeedbackReviewData) async {
+  private func confirmUpload(_ data: FeedbackComposerData) async {
     let config = config
     config.onFunnelEvent?(.reviewUploaded)
     let root = outboxRoot()
@@ -631,13 +750,19 @@ struct ShakeRecorderModifier: ViewModifier {
     offerPendingInterrupted()
   }
 
-  /// Review-sheet Discard: delete the session dir, no upload. A failed delete
+  /// Composer Discard: delete the session dir, no upload. A failed delete
   /// is surfaced (alert) instead of being swallowed behind a success haptic -
   /// the files are still in the outbox and the user should know. The window
   /// teardown happens in the presenter wrapper (a UIKit op outside any SwiftUI
   /// presentation transaction), so `errorMessage` can be set directly here.
-  private func discard(_ data: FeedbackReviewData) {
+  private func discard(_ data: FeedbackComposerData) {
     config.onFunnelEvent?(.reviewDiscarded)
+    // A written report's trail is still open (only `send` closes it). Close it
+    // here too, or the next composer would inherit this one's events.
+    if !FileManager.default.fileExists(
+      atPath: data.dir.appendingPathComponent("events.json").path) {
+      _ = Feedback.shared.stop()
+    }
     do {
       try FileManager.default.removeItem(at: data.dir)
       FeedbackHaptics.light()
@@ -691,14 +816,14 @@ struct ShakeRecorderModifier: ViewModifier {
         // on a later tick.
         pendingInterruptedOffer = true
       case .present(let pending):
-        let offer = Self.reviewData(for: pending)
+        let offer = composerData(for: pending)
         // #472 PARTIAL-4: `present` returns false when no scene is available
         // (still backgrounded). Keep the offer armed so the next didBecomeActive
         // retries; clear it only once the sheet is actually on screen (the user
         // now owns the Upload/Discard decision).
         let presented = reviewPresenter.present(
           data: offer,
-          onUpload: { Task { await confirmUpload(offer) } },
+          onSend: { result in Task { await send(offer, result) } },
           onDiscard: { discard(offer) },
           onOptOut: config.onOptOut)
         pendingInterruptedOffer = !presented
@@ -706,19 +831,22 @@ struct ShakeRecorderModifier: ViewModifier {
     }
   }
 
-  /// Builds the review data for a pending interrupted partial the planner chose
-  /// to present: loads + decodes its `events.json` and tags the explanatory note.
-  private static func reviewData(for pending: FeedbackPendingInterrupted) -> FeedbackReviewData {
+  /// Builds the composer data for a pending interrupted partial the planner
+  /// chose to present: loads + decodes its `events.json`, seeds the partial
+  /// clip into the media slot, and tags the explanatory note. The user can add
+  /// to it here - a note explaining the interrupted session is often the most
+  /// useful thing on the report.
+  private func composerData(for pending: FeedbackPendingInterrupted) -> FeedbackComposerData {
     let eventsURL = pending.dir.appendingPathComponent("events.json")
     let events =
       (try? JSONDecoder().decode(FeedbackSession.self, from: Data(contentsOf: eventsURL)))?
       .events ?? []
-    return FeedbackReviewData(
+    return composerData(
       id: pending.sessionId,
-      movURL: pending.dir.appendingPathComponent("recording.mov"),
       dir: pending.dir,
       events: events,
-      note: "Your recording stopped when you left the app. Send it?")
+      recorded: pending.dir.appendingPathComponent(FeedbackAttachmentNaming.recordingFile),
+      contextNote: "Your recording stopped when you left the app. Send it?")
   }
 
   /// Fixed user-facing copy for a start failure - never surfaces a raw ReplayKit
@@ -916,7 +1044,12 @@ struct ShakeRecorderModifier: ViewModifier {
 /// that shake/tap stops the recording. Copy lives in the package with sensible
 /// defaults - `ShakeToShipConfig` is deliberately not extended per-app for v1.
 private struct FeedbackPromptSheet: View {
+  /// Whether the composer can collect anything on this host (a note or an
+  /// attachment). False leaves the sheet exactly as it was before the composer
+  /// existed: Record, or not now.
+  let showsWrite: Bool
   let onRecord: () -> Void
+  let onWrite: () -> Void
   let onDismiss: () -> Void
 
   var body: some View {
@@ -934,6 +1067,15 @@ private struct FeedbackPromptSheet: View {
           Text("Record & report").frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
+        if showsWrite {
+          // Both actions land in the same composer; this one just gets there
+          // with an empty media slot. Quieter than Record on purpose - a
+          // recording carries far more for the analysis agent than a sentence.
+          Button(action: onWrite) {
+            Text("Write instead").frame(maxWidth: .infinity)
+          }
+          .buttonStyle(.bordered)
+        }
         Button("Not now", action: onDismiss)
           .buttonStyle(.bordered)
       }
