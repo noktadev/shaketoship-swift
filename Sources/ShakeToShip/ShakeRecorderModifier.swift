@@ -149,8 +149,10 @@ struct ShakeRecorderModifier: ViewModifier {
       .background(ShakeDetector { handleShake() })
       .overlay(alignment: .top) {
         if recordingBarVisible {
-          FeedbackRecordingBar { Task { await stopRecording(.user) } }
-            .ignoresSafeArea(edges: .top)
+          FeedbackRecordingBar(microphoneAllowed: config.capabilities.contains(.microphone)) {
+            Task { await stopRecording(.user) }
+          }
+          .ignoresSafeArea(edges: .top)
         }
       }
       // Toast sits top-center; the recording bar is only shown on non-island
@@ -319,6 +321,7 @@ struct ShakeRecorderModifier: ViewModifier {
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
     let rec = FeedbackRecorder(
+      plan: FeedbackGate.capturePlan(for: config, microphoneMuted: FeedbackMicrophonePreference().isMuted),
       maxDuration: config.maxDuration,
       onInterruption: { Task { @MainActor in await pauseRecording() } })
     let lifecycle = FeedbackRecordingSession(directory: dir, capture: rec)
@@ -725,7 +728,11 @@ struct ShakeRecorderModifier: ViewModifier {
       switch error {
       case .recorderBusy, .resetFailed:
         return "Screen recording is busy right now. Close anything else recording your screen, then try again."
-      case .unavailableOnSimulator:
+      case .unavailableOnSimulator, .captureNotPermitted:
+        // .captureNotPermitted is fixed copy, never the raw error - and a
+        // later chunk hides the Record affordance entirely when the
+        // capability is absent, so this path should not be reachable in
+        // practice.
         return "Screen recording isn't available here."
       case .setupFailed, .alreadyRecording, .notRecording, .emptyRecording, .writeFailed:
         return "Couldn't start recording. Please try again."

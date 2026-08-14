@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 public enum FeedbackRecorderError: Error {
@@ -17,6 +18,59 @@ public enum FeedbackRecorderError: Error {
   /// ShakeToShip owned a stranded session but resetting it (`stopCapture`)
   /// failed, so a clean start is impossible. Also maps to fixed copy.
   case resetFailed
+  /// The capture plan's `startsScreenCapture` is false (rule 1): the host's
+  /// `Capabilities` ceiling does not grant `.screenRecording`. Thrown before
+  /// any ReplayKit call, so an absent capability removes the code path
+  /// instead of only the button.
+  case captureNotPermitted
+}
+
+/// Builds the asset writer's inputs from a `FeedbackCapturePlan`. Declared
+/// OUTSIDE `#if os(iOS)`: AVFoundation is available on macOS too, so this is
+/// the one part of the recorder the host test target can exercise with a
+/// real `AVAssetWriter`, proving rule 1 (no capture path) and rule 2 (no
+/// audio input) at the actual seam instead of through a mock.
+enum FeedbackCaptureInputs {
+  static func attach(
+    plan: FeedbackCapturePlan, to writer: AVAssetWriter, width: Int, height: Int
+  ) throws -> (video: AVAssetWriterInput, audio: AVAssetWriterInput?) {
+    // Rule 1: refuse before constructing anything. A caller that ignores the
+    // thrown error must still find an untouched writer.
+    guard plan.startsScreenCapture else { throw FeedbackRecorderError.captureNotPermitted }
+
+    let video = AVAssetWriterInput(
+      mediaType: .video,
+      outputSettings: FeedbackRecorderSettings.video(width: width, height: height))
+    video.expectsMediaDataInRealTime = true
+
+    // Rule 2: build the audio input only when the plan grants the
+    // microphone. `capturesMicrophone` is the one bit that drives this AND
+    // `RPScreenRecorder.isMicrophoneEnabled` (see `FeedbackRecorder.start`),
+    // so the two can never disagree about whether the mic is live.
+    var audio: AVAssetWriterInput?
+    if plan.capturesMicrophone {
+      let input = AVAssetWriterInput(
+        mediaType: .audio,
+        outputSettings: [
+          AVFormatIDKey: kAudioFormatMPEG4AAC,
+          AVNumberOfChannelsKey: 1,
+          AVSampleRateKey: 44_100,
+          AVEncoderBitRateKey: 64_000,
+        ])
+      input.expectsMediaDataInRealTime = true
+      audio = input
+    }
+
+    // Check every input before adding any of them, so a rejection never
+    // leaves the writer half-configured (AVAssetWriter preconditions: only
+    // add when canAdd).
+    guard writer.canAdd(video), audio.map({ writer.canAdd($0) }) ?? true else {
+      throw FeedbackRecorderError.setupFailed
+    }
+    writer.add(video)
+    if let audio { writer.add(audio) }
+    return (video, audio)
+  }
 }
 
 #if os(iOS)
@@ -80,6 +134,11 @@ public actor FeedbackRecorder {
     return created
   }
 
+  /// What this recording is allowed to do. Required, no default: a recorder
+  /// cannot be constructed without stating its plan, which makes rule 1
+  /// (no capability, no ReplayKit call) structural rather than a runtime
+  /// check someone could forget to add at a call site.
+  private let plan: FeedbackCapturePlan
   private let maxDuration: TimeInterval
   /// Invoked (on ReplayKit's queue) when the capture handler reports an error,
   /// i.e. the capture was interrupted (call/background). Routed to the modifier
@@ -90,19 +149,37 @@ public actor FeedbackRecorder {
   private var sink: WriterSink?
   private var outputURL: URL?
 
-  public init(maxDuration: TimeInterval = 300, onInterruption: (@Sendable () -> Void)? = nil) {
+  public init(
+    plan: FeedbackCapturePlan, maxDuration: TimeInterval = 300,
+    onInterruption: (@Sendable () -> Void)? = nil
+  ) {
+    self.plan = plan
     self.maxDuration = maxDuration
     self.onInterruption = onInterruption
   }
 
-  /// Starts capturing to `url`. Throws on the simulator, if a required track
-  /// cannot be added, or if ReplayKit refuses to start.
+  /// Starts capturing to `url`. Throws on the simulator, if the plan does not
+  /// permit screen capture, if a required track cannot be added, or if
+  /// ReplayKit refuses to start.
   public func start(to url: URL) async throws {
     #if targetEnvironment(simulator)
     print("[ShakeToShip] ReplayKit is non-functional on the simulator; recording is a no-op.")
     throw FeedbackRecorderError.unavailableOnSimulator
     #else
+    // Rule 1: refuse before touching `recorder`. `recorder` is a lazy
+    // property whose first access constructs `RPScreenRecorder.shared()`, a
+    // synchronous XPC handshake with replayd - exactly the ReplayKit call an
+    // absent `.screenRecording` capability must prevent.
+    guard plan.startsScreenCapture else { throw FeedbackRecorderError.captureNotPermitted }
     guard writer == nil else { throw FeedbackRecorderError.alreadyRecording }
+
+    // `plan`'s microphone bit is the ceiling resolved once, when this recorder
+    // was constructed. `FeedbackRecordingSession` reuses ONE recorder across
+    // several `start(to:)` calls (pause/resume across app background/
+    // foreground), and the user's mute floor can move under that stored plan
+    // between segments. Re-resolve it here, per segment, so a mute applied
+    // while backgrounded is not silently replayed away on resume (C1).
+    let segmentPlan = FeedbackGate.planForSegment(plan, microphoneMuted: FeedbackMicrophonePreference().isMuted)
 
     // #472 defensive recovery: a prior capture stranded by a background/scene
     // interruption can leave RPScreenRecorder in the recording state even though
@@ -129,34 +206,26 @@ public actor FeedbackRecorder {
     let width = Int(bounds.width)
     let height = Int(bounds.height)
 
-    let video = AVAssetWriterInput(
-      mediaType: .video,
-      outputSettings: FeedbackRecorderSettings.video(width: width, height: height))
-    video.expectsMediaDataInRealTime = true
-
-    let audio = AVAssetWriterInput(
-      mediaType: .audio,
-      outputSettings: [
-        AVFormatIDKey: kAudioFormatMPEG4AAC,
-        AVNumberOfChannelsKey: 1,
-        AVSampleRateKey: 44_100,
-        AVEncoderBitRateKey: 64_000,
-      ])
-    audio.expectsMediaDataInRealTime = true
-
     // Fail loudly rather than silently dropping a track and shipping a
     // malformed MOV (AVAssetWriter preconditions: only add when canAdd).
-    guard assetWriter.canAdd(video), assetWriter.canAdd(audio) else {
+    let inputs: (video: AVAssetWriterInput, audio: AVAssetWriterInput?)
+    do {
+      inputs = try FeedbackCaptureInputs.attach(plan: segmentPlan, to: assetWriter, width: width, height: height)
+    } catch {
       try? FileManager.default.removeItem(at: url)
-      throw FeedbackRecorderError.setupFailed
+      throw error
     }
-    assetWriter.add(video)
-    assetWriter.add(audio)
 
     let sink = WriterSink(
-      writer: assetWriter, videoInput: video, audioInput: audio, maxDuration: maxDuration)
+      writer: assetWriter, videoInput: inputs.video, audioInput: inputs.audio,
+      maxDuration: maxDuration, isMuted: { FeedbackMicrophonePreference().isMuted })
 
-    recorder.isMicrophoneEnabled = true
+    // Always assign, never conditionally: `RPScreenRecorder` is a
+    // process-wide singleton another component may have left `true`, so an
+    // explicit `false` here is the safe write - skipping the assignment
+    // would silently inherit somebody else's microphone state. Uses
+    // `segmentPlan`, not `plan`: this is what THIS segment actually does.
+    recorder.isMicrophoneEnabled = segmentPlan.capturesMicrophone
 
     // The handler must NOT capture actor `self`: capturing it makes the
     // closure actor-isolated under Swift 6, and ReplayKit invokes it on its
@@ -256,12 +325,26 @@ public actor FeedbackRecorder {
   }
 
   /// Clears @State teardown and, only when ReplayKit is confirmed stopped,
-  /// releases process-global ownership. On a failed stop we RETAIN ownership so
-  /// the leftover session is treated as ours to reset on the next start.
+  /// releases process-global ownership and disarms the microphone. On a
+  /// failed stop we RETAIN ownership so the leftover session is treated as
+  /// ours to reset on the next start.
+  ///
+  /// The microphone clear is gated the same way, for two reasons. First,
+  /// `isMicrophoneEnabled` is a ReplayKit setting, not ours to flip while a
+  /// capture may still be live - `stopSucceeded == false` means we do not
+  /// know that it stopped. Second, this method only runs from `stop()`,
+  /// which already proved (via its `guard let writer` at the top) that a
+  /// capture existed here, so touching `recorder` is safe: rule 1 still
+  /// forbids touching it on the refused-start path, which never reaches
+  /// this method. Without this clear, a mic-enabled recording would leave
+  /// the process-wide `RPScreenRecorder` armed for whatever starts the next
+  /// capture - the same hazard the unconditional assignment in `start(to:)`
+  /// was written to guard against, just pointed the other way.
   private func finishTeardown(stopSucceeded: Bool) {
     reset()
     if stopSucceeded {
       FeedbackRecorderOwnership.clearOwned()
+      recorder.isMicrophoneEnabled = false
     }
   }
 
@@ -281,8 +364,18 @@ private final class WriterSink: @unchecked Sendable {
   private let lock = NSLock()
   private let writer: AVAssetWriter
   private let videoInput: AVAssetWriterInput
-  private let audioInput: AVAssetWriterInput
+  /// Nil when the plan did not grant `.microphone` (rule 2): no audio input
+  /// was ever added to the writer, so there is nothing here to append to or
+  /// finish.
+  private let audioInput: AVAssetWriterInput?
   private let maxDuration: TimeInterval
+  /// Live read of the user's mute floor, taken on every audio sample rather
+  /// than once at start. The mute toggle lives on the recording bar DURING
+  /// the recording, so a mute that only took effect next time would be a
+  /// control that lies about the recording it sits on. See `append` for why
+  /// this read is taken outside `lock`: it can make a synchronous
+  /// out-of-process round trip to cfprefsd.
+  private let isMuted: @Sendable () -> Bool
 
   private var startPTS: CMTime?
   private var started = false
@@ -291,16 +384,27 @@ private final class WriterSink: @unchecked Sendable {
 
   init(
     writer: AVAssetWriter, videoInput: AVAssetWriterInput,
-    audioInput: AVAssetWriterInput, maxDuration: TimeInterval
+    audioInput: AVAssetWriterInput?, maxDuration: TimeInterval,
+    isMuted: @escaping @Sendable () -> Bool
   ) {
     self.writer = writer
     self.videoInput = videoInput
     self.audioInput = audioInput
     self.maxDuration = maxDuration
+    self.isMuted = isMuted
   }
 
   /// Called synchronously on ReplayKit's queue for each sample buffer.
   func append(_ sample: CMSampleBuffer, of type: RPSampleBufferType) {
+    // Read the live mute floor BEFORE taking `lock`, not inside it. A
+    // `UserDefaults` read that misses its in-memory cache can make a
+    // synchronous out-of-process round trip to cfprefsd, and `stop()` blocks
+    // on this same lock via `quiesce()` - a media-delivery-queue append must
+    // never hold the lock across a call that can leave the process. Still a
+    // live read per buffer (not cached at construction), just taken outside
+    // the critical section.
+    let muted = type == .audioMic ? isMuted() : false
+
     lock.lock()
     defer { lock.unlock() }
     guard !quiesced, CMSampleBufferDataIsReady(sample) else { return }
@@ -325,6 +429,12 @@ private final class WriterSink: @unchecked Sendable {
     case .video:
       if videoInput.isReadyForMoreMediaData { videoInput.append(sample) }
     case .audioMic:
+      // Muting mid-recording stops audio immediately (checked on every
+      // sample). Unmuting mid-recording cannot retro-add an audio input that
+      // was never armed - `audioInput` stays nil for the rest of this
+      // recording, so it takes effect only from the next one. That asymmetry
+      // is the privacy-safe direction: silence can start late, never end late.
+      guard let audioInput, !muted else { return }
       if audioInput.isReadyForMoreMediaData { audioInput.append(sample) }
     default:
       break
@@ -339,12 +449,13 @@ private final class WriterSink: @unchecked Sendable {
     return started
   }
 
-  /// Marks both inputs finished. Call only after `quiesce()` returned true.
+  /// Marks the video input, and the audio input if one exists, finished.
+  /// Call only after `quiesce()` returned true.
   func markFinished() {
     lock.lock()
     defer { lock.unlock() }
     videoInput.markAsFinished()
-    audioInput.markAsFinished()
+    audioInput?.markAsFinished()
   }
 }
 #endif
