@@ -15,9 +15,9 @@ import Foundation
 /// modifier shows the visible recording bar rather than risk leaving a recording
 /// with no on-screen indicator or stop affordance. Pure (identifier in, Bool
 /// out) so it is unit-tested without a device.
-public enum FeedbackDeviceCapability {
+enum FeedbackDeviceCapability {
   /// The running device's decision, read from `utsname.machine`.
-  public static var current: Bool { hasDynamicIsland(identifier: machineIdentifier()) }
+  static var current: Bool { hasDynamicIsland(identifier: machineIdentifier()) }
 
   /// Model identifiers of every iPhone known to ship a Dynamic Island. Anything
   /// not listed fails safe to "no island" (show the bar). NOTE: `iPhone17,5`
@@ -35,7 +35,7 @@ public enum FeedbackDeviceCapability {
   /// Pure model-identifier decision. See the type doc for the fail-safe rule:
   /// only explicitly-known island phones return true; everything else (unknown
   /// future phones included) returns false so the recording bar is shown.
-  public static func hasDynamicIsland(identifier: String) -> Bool {
+  static func hasDynamicIsland(identifier: String) -> Bool {
     islandModels.contains(identifier)
   }
 

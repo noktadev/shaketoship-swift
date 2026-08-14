@@ -2,50 +2,50 @@ import Foundation
 
 /// The device capture boundary. Session lifecycle tests replace only this leaf;
 /// the production implementation is `FeedbackRecorder`.
-public protocol FeedbackCapture: Sendable {
+protocol FeedbackCapture: Sendable {
   func start(to url: URL) async throws
   func stop() async throws -> URL
 }
 
-public struct FeedbackRecordingSegment: Codable, Sendable, Equatable {
-  public let file: String
+struct FeedbackRecordingSegment: Codable, Sendable, Equatable {
+  let file: String
 
-  public init(file: String) {
+  init(file: String) {
     self.file = file
   }
 }
 
-public enum FeedbackRecordingSessionState: Sendable, Equatable {
+enum FeedbackRecordingSessionState: Sendable, Equatable {
   case ready
   case recording
   case paused
   case finalized
 }
 
-public enum FeedbackRecordingSessionError: Error {
+enum FeedbackRecordingSessionError: Error {
   case invalidTransition
 }
 
 /// Keeps one logical feedback session open while ReplayKit capture is stopped
 /// and restarted across app background/foreground transitions.
-public actor FeedbackRecordingSession {
-  public private(set) var state: FeedbackRecordingSessionState = .ready
+actor FeedbackRecordingSession {
+  private(set) var state: FeedbackRecordingSessionState = .ready
 
   private let directory: URL
   private let capture: any FeedbackCapture
   private var segments: [FeedbackRecordingSegment] = []
 
-  public init(directory: URL, capture: any FeedbackCapture) {
+  init(directory: URL, capture: any FeedbackCapture) {
     self.directory = directory
     self.capture = capture
   }
 
-  public func start() async throws {
+  func start() async throws {
     guard state == .ready else { throw FeedbackRecordingSessionError.invalidTransition }
     try await startSegment()
   }
 
-  public func pause() async throws {
+  func pause() async throws {
     guard state == .recording else { throw FeedbackRecordingSessionError.invalidTransition }
     do {
       try await finishCurrentSegment()
@@ -62,18 +62,18 @@ public actor FeedbackRecordingSession {
     state = .paused
   }
 
-  public func resume() async throws {
+  func resume() async throws {
     guard state == .paused else { throw FeedbackRecordingSessionError.invalidTransition }
     try await startSegment()
   }
 
   /// Read-only snapshot of segments closed so far - does not mutate state.
   /// Used to persist a pause-durability sidecar without finalizing (#669).
-  public func snapshotSegments() -> [FeedbackRecordingSegment] {
+  func snapshotSegments() -> [FeedbackRecordingSegment] {
     segments
   }
 
-  public func finalize() async throws -> [FeedbackRecordingSegment] {
+  func finalize() async throws -> [FeedbackRecordingSegment] {
     switch state {
     case .recording:
       try await finishCurrentSegment()

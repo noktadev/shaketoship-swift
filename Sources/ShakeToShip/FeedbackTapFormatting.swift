@@ -2,13 +2,13 @@ import Foundation
 
 /// Pure formatting for tap events: everything the UIKit capture layer decides
 /// that is worth testing lives here, so the hierarchy walk itself stays thin.
-public enum FeedbackTapFormatting {
+enum FeedbackTapFormatting {
   /// Longest element string recorded, including the ellipsis.
-  public static let elementMaxLength = 80
+  static let elementMaxLength = 80
 
   /// A coordinate as a 0-1 fraction of `extent`, clamped to bounds and rounded
   /// to 2 decimals (finer precision is noise for an agent reading the trail).
-  public static func normalized(_ value: Double, in extent: Double) -> Double {
+  static func normalized(_ value: Double, in extent: Double) -> Double {
     guard extent > 0 else { return 0 }
     let fraction = min(max(value / extent, 0), 1)
     return (fraction * 100).rounded() / 100
@@ -18,7 +18,7 @@ public enum FeedbackTapFormatting {
   /// else accessibility identifier, else a title (e.g. a button's title text).
   /// Blank candidates are skipped, whitespace runs collapse to single spaces,
   /// and the result is capped at `elementMaxLength`. nil when nothing usable.
-  public static func elementText(label: String?, identifier: String?, title: String?) -> String? {
+  static func elementText(label: String?, identifier: String?, title: String?) -> String? {
     for candidate in [label, identifier, title] {
       guard let cleaned = clean(candidate) else { continue }
       return truncate(cleaned)
@@ -42,11 +42,11 @@ extension FeedbackTapFormatting {
   /// One node discovered while walking a hierarchy for a tap point: how many
   /// hops from the root it sits at, and its already-resolved name (nil when
   /// the node exposed nothing nameable via `elementText`).
-  public struct AccessibilityHit {
-    public let depth: Int
-    public let name: String?
+  struct AccessibilityHit {
+    let depth: Int
+    let name: String?
 
-    public init(depth: Int, name: String?) {
+    init(depth: Int, name: String?) {
       self.depth = depth
       self.name = name
     }
@@ -61,7 +61,7 @@ extension FeedbackTapFormatting {
   ///
   /// Kept separate from the tree walk itself so the "prefer deepest, else
   /// fall back up" rule is exercised by tests without a live UIKit hierarchy.
-  public static func deepestNamedHit(_ hits: [AccessibilityHit]) -> String? {
+  static func deepestNamedHit(_ hits: [AccessibilityHit]) -> String? {
     hits
       .sorted { $0.depth > $1.depth }
       .lazy

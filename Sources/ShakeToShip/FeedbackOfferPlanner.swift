@@ -13,7 +13,7 @@ import Foundation
 /// Foundation-only on purpose: it decides over `FeedbackPendingInterrupted`
 /// (not the UIKit-gated `FeedbackReviewData`) so it compiles and tests on the
 /// host, where UIKit - and therefore the modifier - is `#if`-compiled out.
-public enum FeedbackOfferDecision: Equatable {
+enum FeedbackOfferDecision: Equatable {
   /// Present the review sheet for this partial (newest of the pending set).
   case present(FeedbackPendingInterrupted)
   /// Nothing can be presented right now (a live capture/prompt/review, or a
@@ -31,7 +31,7 @@ public enum FeedbackOfferDecision: Equatable {
 /// (like `pendingInterruptedSessions`, these are `nonisolated`/`static` and
 /// safe off the MainActor), but takes NO view state - the caller passes the
 /// live `busy`/presentation/single-flight flags in.
-public enum FeedbackOfferPlanner {
+enum FeedbackOfferPlanner {
   /// Modification date of an interrupted partial's dir; `.distantPast` when the
   /// dir is gone (removed between scan and decision) so `max(by:)` never crashes
   /// on a candidate that vanished mid-flight.
@@ -67,7 +67,7 @@ public enum FeedbackOfferPlanner {
   ///     invocation must do nothing.
   ///   - now: reserved for the time-based retention #491 will add to the offer
   ///     decision; unused today (offer logic has no time input yet).
-  public static func decide(
+  static func decide(
     scanResult: [FeedbackPendingInterrupted],
     busy: Bool,
     presentationPossible: Bool,

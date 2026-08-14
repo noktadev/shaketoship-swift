@@ -13,11 +13,11 @@ import Foundation
 /// The value is capped to the ingest contract's 128-character limit; an
 /// over-long host value is truncated rather than dropped so the reporter still
 /// gets SOME stable identity.
-public enum FeedbackUserRef {
+enum FeedbackUserRef {
   static let defaultsKey = "appfeedback.user_ref"
   static let maxLength = 128
 
-  public static func resolve(
+  static func resolve(
     configured: String?,
     defaults: UserDefaults = .standard
   ) -> String {

@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 /// Injectable HTTP seam so presign/upload logic is unit testable without network.
-public protocol FeedbackTransport: Sendable {
+protocol FeedbackTransport: Sendable {
   func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse)
   /// Streams `file` from disk as the request body (no full-file `Data` copy) -
   /// used for the recording PUT so a ~100MB video upload never doubles memory.
@@ -10,11 +10,11 @@ public protocol FeedbackTransport: Sendable {
 }
 
 /// Production transport backed by `URLSession`.
-public struct URLSessionTransport: FeedbackTransport {
+struct URLSessionTransport: FeedbackTransport {
   private let session: URLSession
-  public init(session: URLSession = .shared) { self.session = session }
+  init(session: URLSession = .shared) { self.session = session }
 
-  public func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+  func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
     let (data, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse else {
       throw FeedbackUploadError.notHTTP
@@ -22,7 +22,7 @@ public struct URLSessionTransport: FeedbackTransport {
     return (data, http)
   }
 
-  public func upload(_ request: URLRequest, fromFile file: URL) async throws -> (
+  func upload(_ request: URLRequest, fromFile file: URL) async throws -> (
     Data, HTTPURLResponse
   ) {
     let (data, response) = try await session.upload(for: request, fromFile: file)
@@ -33,7 +33,7 @@ public struct URLSessionTransport: FeedbackTransport {
   }
 }
 
-public enum FeedbackUploadError: Error {
+enum FeedbackUploadError: Error {
   case notHTTP
   case missingPresignedURL(String)
 }
@@ -47,7 +47,7 @@ private let shakeToShipSDKVersion = "2.0.0"
 /// Local confirmation marker written into a session dir when the user taps
 /// Upload in the review sheet. NEVER uploaded - the evidence plan does not
 /// include it. It only tells the launch sweep this session was user-confirmed.
-public let feedbackConfirmedMarker = ".confirmed"
+let feedbackConfirmedMarker = ".confirmed"
 
 /// Writes the user-confirmation marker into `dir`, retrying ONCE on failure.
 /// Returns true only when the marker is on disk.
@@ -68,7 +68,7 @@ func writeFeedbackConfirmedMarker(
 /// backgrounding interruption (#472). Like `.confirmed` it is NEVER uploaded
 /// because the evidence plan does not include it. It does NOT gate the launch
 /// sweep. It tags the partial so the next foreground can offer to send it.
-public let feedbackInterruptedMarker = ".interrupted"
+let feedbackInterruptedMarker = ".interrupted"
 
 /// Writes the interruption marker into `dir` (retries once). See
 /// `writeFeedbackConfirmedMarker` for the retry rationale.
@@ -125,11 +125,11 @@ func clearFeedbackPauseDurability(in dir: URL) {
 }
 
 /// An interrupted-but-finalized session awaiting a foreground resend offer.
-public struct FeedbackPendingInterrupted: Equatable, Sendable {
-  public let sessionId: String
-  public let dir: URL
+struct FeedbackPendingInterrupted: Equatable, Sendable {
+  let sessionId: String
+  let dir: URL
 
-  public init(sessionId: String, dir: URL) {
+  init(sessionId: String, dir: URL) {
     self.sessionId = sessionId
     self.dir = dir
   }
@@ -139,7 +139,7 @@ public struct FeedbackPendingInterrupted: Equatable, Sendable {
 /// carrying the `.interrupted` marker AND a `recording.mov` (something to send)
 /// but NOT yet `.confirmed`. The modifier reads this on `willEnterForeground` to
 /// offer "your recording stopped when you left the app - send it?".
-public func pendingInterruptedSessions(
+func pendingInterruptedSessions(
   root: URL, fileManager: FileManager = .default
 ) -> [FeedbackPendingInterrupted] {
   guard
@@ -166,12 +166,12 @@ public func pendingInterruptedSessions(
 /// Tally of one `retryOutbox()` sweep. `flushed` = dirs uploaded and removed;
 /// `queued` = dirs with files that failed upload (retained for next launch);
 /// `purged` = zero-whitelisted-file dirs (crashed sessions) deleted.
-public struct OutboxSweepResult: Sendable, Equatable {
-  public let flushed: Int
-  public let queued: Int
-  public let purged: Int
+struct OutboxSweepResult: Sendable, Equatable {
+  let flushed: Int
+  let queued: Int
+  let purged: Int
 
-  public init(flushed: Int, queued: Int, purged: Int) {
+  init(flushed: Int, queued: Int, purged: Int) {
     self.flushed = flushed
     self.queued = queued
     self.purged = purged
@@ -181,14 +181,14 @@ public struct OutboxSweepResult: Sendable, Equatable {
 /// Presigns and uploads a session's files to R2 via the collector worker, then
 /// deletes the local session dir on full success. Each successful PUT removes
 /// its local file, so `retryOutbox()` sends only work that remains.
-public struct FeedbackUploader {
+struct FeedbackUploader {
   private let config: ShakeToShipConfig
   private let transport: FeedbackTransport
   private let fileManager: FileManager
   /// Root of `Documents/feedback-outbox`; each session lives in `<root>/<sessionId>/`.
   private let outboxRoot: URL
 
-  public init(
+  init(
     config: ShakeToShipConfig,
     transport: FeedbackTransport,
     fileManager: FileManager,
@@ -236,7 +236,7 @@ public struct FeedbackUploader {
   /// file reached R2 AND the local dir was successfully removed; false on any
   /// upload OR deletion failure.
   @discardableResult
-  public func flush(sessionId: String) async -> Bool {
+  func flush(sessionId: String) async -> Bool {
     let dir = outboxRoot.appendingPathComponent(sessionId, isDirectory: true)
     guard let present = existingFiles(in: dir) else { return false }
     let completionURL = dir.appendingPathComponent(feedbackCompletionFile)
@@ -425,7 +425,7 @@ public struct FeedbackUploader {
   /// days (well beyond `purgeAge`, so a normal partial is offered across many
   /// launches first).
   @discardableResult
-  public func retryOutbox(
+  func retryOutbox(
     purgeAge: TimeInterval = 3600,
     interruptedRetention: TimeInterval = 7 * 24 * 3600
   ) async -> OutboxSweepResult {

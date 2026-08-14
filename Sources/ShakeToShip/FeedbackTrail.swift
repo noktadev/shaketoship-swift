@@ -7,7 +7,7 @@ import Foundation
 ///
 /// This is the testable core behind the `Feedback` facade. Time is injectable
 /// via `now` (monotonic seconds) so trail behavior is deterministic in tests.
-public final class FeedbackTrail: @unchecked Sendable {
+final class FeedbackTrail: @unchecked Sendable {
   static let bufferCapacity = 20
 
   private let now: @Sendable () -> Double
@@ -37,7 +37,7 @@ public final class FeedbackTrail: @unchecked Sendable {
 
   /// `now` defaults to a monotonic clock (`systemUptime`) so an NTP/wall-clock
   /// jump mid-recording cannot corrupt event `t` values. Tests inject their own.
-  public init(now: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
+  init(now: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
     self.now = now
   }
 
@@ -47,7 +47,7 @@ public final class FeedbackTrail: @unchecked Sendable {
   /// seam - so overlapping observers (e.g. a nav path and a sheet flag that
   /// both mutate on one transition, or a root seam handing off to a shell
   /// seam) cannot double-record the same screen.
-  public func screen(_ name: String) {
+  func screen(_ name: String) {
     lock.lock()
     var notify: Int?
     if active != nil {
@@ -75,7 +75,7 @@ public final class FeedbackTrail: @unchecked Sendable {
   /// Taps are session-only: unlike screen names there is no idle buffer, so a
   /// tap outside a recording is dropped rather than leaking into the next
   /// session's seed. `x`/`y` are already normalized (see `FeedbackTapFormatting`).
-  public func tap(x: Double, y: Double, element: String?) {
+  func tap(x: Double, y: Double, element: String?) {
     lock.lock()
     if active != nil {
       let t = now() - active!.start
@@ -88,7 +88,7 @@ public final class FeedbackTrail: @unchecked Sendable {
   /// each new recorded event. Pass `nil` to clear. Thread-safe. One call per new
   /// event (the modifier relies on this: at most one Live Activity update per
   /// screen change).
-  public func setActiveEventHandler(_ handler: (@Sendable (Int) -> Void)?) {
+  func setActiveEventHandler(_ handler: (@Sendable (Int) -> Void)?) {
     lock.lock()
     onActiveEvent = handler
     lock.unlock()
@@ -98,7 +98,7 @@ public final class FeedbackTrail: @unchecked Sendable {
   /// event when a buffered name exists. Returns the seeded event count so the
   /// caller can start the Live Activity at the real screen count.
   @discardableResult
-  public func startSession(
+  func startSession(
     sessionId: String, app: String, build: String, startedAt: String, userRef: String? = nil
   ) -> Int {
     lock.lock()
@@ -118,7 +118,7 @@ public final class FeedbackTrail: @unchecked Sendable {
   /// Ends the recording and returns the assembled session. Returns an empty
   /// session if called with no active recording.
   @discardableResult
-  public func stop() -> FeedbackSession {
+  func stop() -> FeedbackSession {
     lock.lock()
     defer { lock.unlock() }
     guard let a = active else {
@@ -134,7 +134,7 @@ public final class FeedbackTrail: @unchecked Sendable {
   /// unlike `stop()`, does NOT end the recording. Used to persist a
   /// pause-durability sidecar while a background/foreground segment boundary
   /// is in flight (#669). Returns an empty session when nothing is active.
-  public func snapshot() -> FeedbackSession {
+  func snapshot() -> FeedbackSession {
     lock.lock()
     defer { lock.unlock() }
     guard let a = active else {
@@ -148,13 +148,13 @@ public final class FeedbackTrail: @unchecked Sendable {
 
 /// Static facade apps call on navigation changes: `Feedback.screen("Home")`.
 public enum Feedback {
-  public static let shared = FeedbackTrail()
+  static let shared = FeedbackTrail()
 
   public static func screen(_ name: String) {
     shared.screen(name)
   }
 
-  public static func tap(x: Double, y: Double, element: String?) {
+  static func tap(x: Double, y: Double, element: String?) {
     shared.tap(x: x, y: y, element: element)
   }
 }

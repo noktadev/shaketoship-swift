@@ -5,12 +5,12 @@ import Foundation
 /// is how they stop it. Kept dependency-free like `FeedbackGate` /
 /// `FeedbackCoachMarkGate` so the show/auto-clear/stop-clears matrix is
 /// unit-tested without a live view or timer.
-public enum FeedbackShakeHintGate {
+enum FeedbackShakeHintGate {
   /// How long the hint stays visible once shown, absent an earlier dismissal.
-  public static let visibleDuration: TimeInterval = 4
+  static let visibleDuration: TimeInterval = 4
 
   /// Inputs the caller reacts to; each maps to a new visibility below.
-  public enum Event {
+  enum Event {
     /// A recording just started.
     case recordingStarted
     /// The auto-dismiss timer elapsed.
@@ -24,7 +24,7 @@ public enum FeedbackShakeHintGate {
   /// Stateless and total: every event has exactly one outcome, independent of
   /// `isVisible`, so "never shows when recording stops normally" holds even
   /// if `recordingStopped` arrives while the hint was already hidden.
-  public static func reduce(isVisible: Bool, event: Event) -> Bool {
+  static func reduce(isVisible: Bool, event: Event) -> Bool {
     switch event {
     case .recordingStarted: return true
     case .timerElapsed: return false

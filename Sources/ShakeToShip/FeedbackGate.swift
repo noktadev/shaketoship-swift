@@ -4,7 +4,7 @@ import Foundation
 /// and UIKit-free so the "provably inert when off" and "don't nag" rules are
 /// unit-tested without a live responder chain or recorder, exactly like
 /// `FeedbackTapFormatting`.
-public enum FeedbackGate {
+enum FeedbackGate {
   /// Whether `.shakeToShip(config:)` installs the recorder at all. A nil
   /// config is the inertness proof: no shake responder, no review window, no
   /// recorder is ever constructed. The per-app resolver decides the config is
@@ -13,7 +13,7 @@ public enum FeedbackGate {
   /// An empty `capabilities` ceiling is inert the same way: a host that
   /// grants nothing gets no responder either, so there is one inertness rule,
   /// not two.
-  public static func shouldAttach(config: ShakeToShipConfig?) -> Bool {
+  static func shouldAttach(config: ShakeToShipConfig?) -> Bool {
     guard let config else { return false }
     return !config.capabilities.isEmpty
   }
@@ -24,13 +24,13 @@ public enum FeedbackGate {
 /// `startsScreenCapture == false` is refused by `FeedbackRecorder` before any
 /// ReplayKit call is made, so an absent capability removes the code path
 /// rather than only the button.
-public struct FeedbackCapturePlan: Equatable, Sendable {
+struct FeedbackCapturePlan: Equatable, Sendable {
   /// Whether starting a ReplayKit capture is permitted at all.
-  public let startsScreenCapture: Bool
+  let startsScreenCapture: Bool
   /// The one bit that drives BOTH the asset writer's audio input and
   /// `RPScreenRecorder.isMicrophoneEnabled`, so the two can never disagree
   /// about whether the microphone is live.
-  public let capturesMicrophone: Bool
+  let capturesMicrophone: Bool
 
   /// Internal, not public: outside this module a plan can only come from
   /// `FeedbackGate.capturePlan(for:microphoneMuted:)` or `.inert`, so there is
@@ -42,7 +42,7 @@ public struct FeedbackCapturePlan: Equatable, Sendable {
   }
 
   /// The plan for a config that permits nothing: no capture, no microphone.
-  public static let inert = FeedbackCapturePlan(startsScreenCapture: false, capturesMicrophone: false)
+  static let inert = FeedbackCapturePlan(startsScreenCapture: false, capturesMicrophone: false)
 }
 
 extension FeedbackGate {
@@ -51,7 +51,7 @@ extension FeedbackGate {
   /// server-side storage request, not a capture bit (rule 3), so flipping it
   /// changes no field here. The flag IS carried on `ShakeToShipConfig`, but is
   /// not yet transmitted to the collector, so today it has no effect either way.
-  public static func capturePlan(
+  static func capturePlan(
     for config: ShakeToShipConfig, microphoneMuted: Bool = false
   ) -> FeedbackCapturePlan {
     FeedbackCapturePlan(
@@ -86,6 +86,10 @@ extension FeedbackGate {
 /// injected `UserDefaults` rather than a singleton or actor, so tests prove
 /// "persists per install" by reading it back through a second instance built
 /// on the same suite, the way a relaunched app would.
+///
+/// The type is public for ONE member: `storageKey`. Reading and writing the
+/// floor stays inside the module, so a host binds a Settings toggle to the key
+/// and does nothing else with this type.
 public struct FeedbackMicrophonePreference {
   /// The ONE key this floor lives under. The recorder's read, the recording
   /// bar's `@AppStorage` toggle and a host app's Settings row all address it,
@@ -100,13 +104,13 @@ public struct FeedbackMicrophonePreference {
 
   private let defaults: UserDefaults
 
-  public init(defaults: UserDefaults = .standard) {
+  init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
   }
 
   /// Unmuted by default - a fresh install has no floor below the host's
   /// `Capabilities` ceiling until the user chooses one.
-  public var isMuted: Bool {
+  var isMuted: Bool {
     defaults.bool(forKey: Self.storageKey)
   }
 
@@ -121,7 +125,7 @@ public struct FeedbackMicrophonePreference {
 }
 
 /// What an idle/active shake should do, once suppression is accounted for.
-public enum FeedbackShakeAction: Equatable {
+enum FeedbackShakeAction: Equatable {
   /// Suppressed - busy, mid-review, past the rate cap, or inside the cooldown.
   case ignore
   /// Already recording: a shake stops it.
@@ -133,17 +137,17 @@ public enum FeedbackShakeAction: Equatable {
 /// Decides whether a shake surfaces the prompt. The cooldown stops a
 /// walking-with-phone nag loop after a "Not now"; the rate cap goes silent
 /// after `maxPromptsPerSession` dismissals until the next launch.
-public enum FeedbackPromptGate {
+enum FeedbackPromptGate {
   /// After a "Not now", ignore shakes for this long.
-  public static let cooldownSeconds: TimeInterval = 60
+  static let cooldownSeconds: TimeInterval = 60
   /// Max prompts surfaced per app session; silent afterwards.
-  public static let maxPromptsPerSession = 3
+  static let maxPromptsPerSession = 3
 
   /// - Parameters:
   ///   - now / lastDismissedAt: seconds on any monotonic-ish clock; only their
   ///     difference matters, so the caller can pass `Date().timeIntervalSince1970`
   ///     or `ProcessInfo.systemUptime` as long as it is consistent.
-  public static func action(
+  static func action(
     isRecording: Bool,
     busy: Bool,
     reviewPresenting: Bool,

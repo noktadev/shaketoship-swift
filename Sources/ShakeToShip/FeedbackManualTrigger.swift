@@ -11,12 +11,12 @@ public enum FeedbackManualTrigger {
   private static var handler: (@MainActor () -> Void)?
 
   /// The modifier registers this while mounted (recorder active at all).
-  public static func register(_ handler: @escaping @MainActor () -> Void) {
+  static func register(_ handler: @escaping @MainActor () -> Void) {
     self.handler = handler
   }
 
   /// The modifier unregisters on teardown so a stale closure cannot fire.
-  public static func unregister() {
+  static func unregister() {
     handler = nil
   }
 

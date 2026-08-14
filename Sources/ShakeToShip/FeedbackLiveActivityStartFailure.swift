@@ -8,7 +8,7 @@ import Foundation
 /// surface of the start path.
 ///
 /// Raw values are analytics wire strings - see the funnel event that carries them.
-public enum FeedbackLiveActivityStartFailure: String, Sendable, Equatable, CaseIterable {
+enum FeedbackLiveActivityStartFailure: String, Sendable, Equatable, CaseIterable {
   /// `ActivityAuthorizationInfo().areActivitiesEnabled` was false: the user has
   /// Live Activities switched off for this app (Settings > <app> > Live
   /// Activities, or the system-wide toggle). Nothing the app can do about it -

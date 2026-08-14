@@ -1,7 +1,7 @@
 import Foundation
 
 /// Where a shake lands, once the host's capability ceiling is resolved.
-public enum FeedbackShakeDestination: Equatable, Sendable {
+enum FeedbackShakeDestination: Equatable, Sendable {
   /// Ask first: this host can record, so the "Something wrong?" prompt offers
   /// Record or Write.
   case prompt
@@ -14,9 +14,9 @@ public enum FeedbackShakeDestination: Equatable, Sendable {
 
 /// One picked item's journey onto disk: where it is now, and the name chunk H
 /// uploads it under.
-public struct FeedbackAttachmentWrite: Equatable, Sendable {
-  public let source: URL
-  public let fileName: String
+struct FeedbackAttachmentWrite: Equatable, Sendable {
+  let source: URL
+  let fileName: String
 }
 
 /// Every rule the composer obeys, as pure functions.
@@ -26,28 +26,28 @@ public struct FeedbackAttachmentWrite: Equatable, Sendable {
 /// each affordance live here, where `swift test` runs them with no UIKit, no
 /// photo library and no device. That is the same split `FeedbackGate` and
 /// `FeedbackTapFormatting` already use.
-public enum FeedbackComposerRules {
+enum FeedbackComposerRules {
   /// Send is disabled until there is media OR a non-blank note. The SDK never
   /// sends an empty report.
-  public static func sendEnabled(media: [FeedbackMediaItem], note: String) -> Bool {
+  static func sendEnabled(media: [FeedbackMediaItem], note: String) -> Bool {
     !media.isEmpty || !trimmed(note).isEmpty
   }
 
   /// No Attach button without `.photoLibrary` - and none once the basket is
   /// full, because the cap is on the composer's media, not on one picker
   /// session (the recorded clip already holds a slot).
-  public static func showsAttach(capabilities: Capabilities, mediaCount: Int) -> Bool {
+  static func showsAttach(capabilities: Capabilities, mediaCount: Int) -> Bool {
     capabilities.contains(.photoLibrary) && mediaCount < FeedbackAttachmentBounds.maxItems
   }
 
   /// No note field without `.text`.
-  public static func showsNoteField(capabilities: Capabilities) -> Bool {
+  static func showsNoteField(capabilities: Capabilities) -> Bool {
     capabilities.contains(.text)
   }
 
   /// No Record action without `.screenRecording`. Read by the shake prompt,
   /// which is where the Record affordance lives.
-  public static func showsRecordAction(capabilities: Capabilities) -> Bool {
+  static func showsRecordAction(capabilities: Capabilities) -> Bool {
     capabilities.contains(.screenRecording)
   }
 
@@ -58,20 +58,20 @@ public enum FeedbackComposerRules {
   /// from the strip would remove the thumbnail and upload the video anyway,
   /// which is worse than not offering the affordance. Discard drops the whole
   /// report, which is how a recording is unsent.
-  public static func showsRemove(for item: FeedbackMediaItem) -> Bool {
+  static func showsRemove(for item: FeedbackMediaItem) -> Bool {
     !item.isRecorded
   }
 
   /// The picker only ever offers the slots that are still free, so a selection
   /// can never overshoot the cap and be trimmed after the user made it.
-  public static func remainingSelectionLimit(mediaCount: Int) -> Int {
+  static func remainingSelectionLimit(mediaCount: Int) -> Int {
     max(0, FeedbackAttachmentBounds.maxItems - mediaCount)
   }
 
   /// A host that cannot record must not be asked "Record & report", and a host
   /// with nothing to compose must not be shown an empty composer that can
   /// never send.
-  public static func shakeDestination(capabilities: Capabilities) -> FeedbackShakeDestination {
+  static func shakeDestination(capabilities: Capabilities) -> FeedbackShakeDestination {
     if showsRecordAction(capabilities: capabilities) { return .prompt }
     if capabilities.contains(.text) || capabilities.contains(.photoLibrary) { return .composer }
     return .none
@@ -80,7 +80,7 @@ public enum FeedbackComposerRules {
   /// Picked items numbered from zero in composer order. The recorded clip is
   /// skipped: it is already `recording.mov` in the session dir and is never
   /// re-written as an attachment.
-  public static func attachmentPlan(media: [FeedbackMediaItem]) -> [FeedbackAttachmentWrite] {
+  static func attachmentPlan(media: [FeedbackMediaItem]) -> [FeedbackAttachmentWrite] {
     media.filter { !$0.isRecorded }.enumerated().map { index, item in
       FeedbackAttachmentWrite(
         source: item.url,
@@ -91,7 +91,7 @@ public enum FeedbackComposerRules {
   /// What `note.txt` should contain, or nil when there is no note to write.
   /// Trimmed: trailing whitespace the user never sees must not become a file
   /// that reads as content to the analysis agent.
-  public static func noteFileContents(note: String) -> String? {
+  static func noteFileContents(note: String) -> String? {
     let text = trimmed(note)
     return text.isEmpty ? nil : text
   }
@@ -102,11 +102,11 @@ public enum FeedbackComposerRules {
 }
 
 /// What the composer hands back on Send.
-public struct FeedbackComposerResult: Sendable, Equatable {
-  public let media: [FeedbackMediaItem]
-  public let note: String
+struct FeedbackComposerResult: Sendable, Equatable {
+  let media: [FeedbackMediaItem]
+  let note: String
 
-  public init(media: [FeedbackMediaItem], note: String) {
+  init(media: [FeedbackMediaItem], note: String) {
     self.media = media
     self.note = note
   }

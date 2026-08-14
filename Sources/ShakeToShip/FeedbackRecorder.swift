@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-public enum FeedbackRecorderError: Error {
+enum FeedbackRecorderError: Error {
   case unavailableOnSimulator
   case alreadyRecording
   case notRecording
@@ -116,7 +116,7 @@ import ReplayKit
 ///
 /// NOT unit tested - ReplayKit is device-only. Kept thin and isolated from the
 /// tested logic (session model, trail, uploader).
-public actor FeedbackRecorder {
+actor FeedbackRecorder {
   /// #943: built lazily, INSIDE actor isolation. The first
   /// `RPScreenRecorder.shared()` in a process is a synchronous XPC handshake
   /// with `replayd`, and a stored-property initializer runs as part of the
@@ -149,7 +149,7 @@ public actor FeedbackRecorder {
   private var sink: WriterSink?
   private var outputURL: URL?
 
-  public init(
+  init(
     plan: FeedbackCapturePlan, maxDuration: TimeInterval = 300,
     onInterruption: (@Sendable () -> Void)? = nil
   ) {
@@ -161,7 +161,7 @@ public actor FeedbackRecorder {
   /// Starts capturing to `url`. Throws on the simulator, if the plan does not
   /// permit screen capture, if a required track cannot be added, or if
   /// ReplayKit refuses to start.
-  public func start(to url: URL) async throws {
+  func start(to url: URL) async throws {
     #if targetEnvironment(simulator)
     print("[ShakeToShip] ReplayKit is non-functional on the simulator; recording is a no-op.")
     throw FeedbackRecorderError.unavailableOnSimulator
@@ -265,7 +265,7 @@ public actor FeedbackRecorder {
   /// Finalizes the recording and returns the output file URL. Throws
   /// `.emptyRecording` if no sample ever arrived (partial file removed) and
   /// `.writeFailed` if the writer ended in `.failed` (caller must discard).
-  public func stop() async throws -> URL {
+  func stop() async throws -> URL {
     #if targetEnvironment(simulator)
     throw FeedbackRecorderError.notRecording
     #else

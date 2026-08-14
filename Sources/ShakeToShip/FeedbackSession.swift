@@ -4,12 +4,12 @@ import Foundation
 /// window bounds (2 decimals). `element` is the best accessibility description
 /// of what was hit, or nil when the hierarchy exposes nothing usable - the
 /// coordinates are still worth recording.
-public struct FeedbackTap: Codable, Sendable, Equatable {
-  public let x: Double
-  public let y: Double
-  public let element: String?
+struct FeedbackTap: Codable, Sendable, Equatable {
+  let x: Double
+  let y: Double
+  let element: String?
 
-  public init(x: Double, y: Double, element: String?) {
+  init(x: Double, y: Double, element: String?) {
     self.x = x
     self.y = y
     self.element = element
@@ -18,7 +18,7 @@ public struct FeedbackTap: Codable, Sendable, Equatable {
   private enum CodingKeys: String, CodingKey { case x, y, element }
 
   /// Hand-written so a nil element OMITS the key instead of writing `null`.
-  public func encode(to encoder: any Encoder) throws {
+  func encode(to encoder: any Encoder) throws {
     var c = encoder.container(keyedBy: CodingKeys.self)
     try c.encode(x, forKey: .x)
     try c.encode(y, forKey: .y)
@@ -32,16 +32,16 @@ public struct FeedbackTap: Codable, Sendable, Equatable {
 /// A tagged union on the wire: screen entries stay EXACTLY `{t, screen}` (the
 /// shape written before taps existed, so old sessions decode and old readers
 /// keep working) and taps are `{t, tap: {x, y, element?}}`.
-public enum FeedbackEvent: Codable, Sendable, Equatable {
+enum FeedbackEvent: Codable, Sendable, Equatable {
   case screen(t: Double, name: String)
   case tap(t: Double, tap: FeedbackTap)
 
   /// Source-compatible with the pre-union struct: `FeedbackEvent(t:screen:)`.
-  public init(t: Double, screen: String) {
+  init(t: Double, screen: String) {
     self = .screen(t: t, name: screen)
   }
 
-  public var t: Double {
+  var t: Double {
     switch self {
     case let .screen(t, _): return t
     case let .tap(t, _): return t
@@ -49,7 +49,7 @@ public enum FeedbackEvent: Codable, Sendable, Equatable {
   }
 
   /// The screen name for screen events; nil for taps.
-  public var screen: String? {
+  var screen: String? {
     switch self {
     case let .screen(_, name): return name
     case .tap: return nil
@@ -58,7 +58,7 @@ public enum FeedbackEvent: Codable, Sendable, Equatable {
 
   private enum CodingKeys: String, CodingKey { case t, screen, tap }
 
-  public init(from decoder: any Decoder) throws {
+  init(from decoder: any Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     let t = try c.decode(Double.self, forKey: .t)
     if let tap = try c.decodeIfPresent(FeedbackTap.self, forKey: .tap) {
@@ -75,7 +75,7 @@ public enum FeedbackEvent: Codable, Sendable, Equatable {
         debugDescription: "Trail event has neither a screen nor a tap"))
   }
 
-  public func encode(to encoder: any Encoder) throws {
+  func encode(to encoder: any Encoder) throws {
     var c = encoder.container(keyedBy: CodingKeys.self)
     try c.encode(t, forKey: .t)
     switch self {
@@ -87,21 +87,21 @@ public enum FeedbackEvent: Codable, Sendable, Equatable {
 
 /// The sidecar `events.json` describing a feedback recording session.
 /// Keys are snake_case to match the repo's JSON conventions.
-public struct FeedbackSession: Codable, Sendable, Equatable {
-  public let session_id: String
-  public let app: String
-  public let build: String
-  public let started_at: String
+struct FeedbackSession: Codable, Sendable, Equatable {
+  let session_id: String
+  let app: String
+  let build: String
+  let started_at: String
   /// Stable reporter identity (see `FeedbackUserRef`). The processor copies it
   /// onto the session record so resolved-issue inbox messages can address this
   /// reporter. Optional so pre-userRef payloads still decode.
-  public let user_ref: String?
-  public let events: [FeedbackEvent]
+  let user_ref: String?
+  let events: [FeedbackEvent]
   /// Ordered capture files for this logical session. Optional so sidecars from
   /// before segmented recording remain source- and wire-compatible.
-  public let segments: [FeedbackRecordingSegment]?
+  let segments: [FeedbackRecordingSegment]?
 
-  public init(
+  init(
     session_id: String,
     app: String,
     build: String,
