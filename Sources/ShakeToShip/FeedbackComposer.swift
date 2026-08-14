@@ -45,10 +45,13 @@ enum FeedbackComposerRules {
     capabilities.contains(.text)
   }
 
-  /// No Record action without `.screenRecording`. Read by the shake prompt,
-  /// which is where the Record affordance lives.
-  static func showsRecordAction(capabilities: Capabilities) -> Bool {
-    capabilities.contains(.screenRecording)
+  /// No Record action without `.screenRecording` or when ReplayKit is not
+  /// available. Device availability can only narrow the host's capability
+  /// ceiling. The default keeps existing non-device callers source compatible.
+  static func showsRecordAction(
+    capabilities: Capabilities, recordingAvailable: Bool = true
+  ) -> Bool {
+    capabilities.contains(.screenRecording) && recordingAvailable
   }
 
   /// Whether an item may be taken back out of the strip.
@@ -71,8 +74,12 @@ enum FeedbackComposerRules {
   /// A host that cannot record must not be asked "Record & report", and a host
   /// with nothing to compose must not be shown an empty composer that can
   /// never send.
-  static func shakeDestination(capabilities: Capabilities) -> FeedbackShakeDestination {
-    if showsRecordAction(capabilities: capabilities) { return .prompt }
+  static func shakeDestination(
+    capabilities: Capabilities, recordingAvailable: Bool = true
+  ) -> FeedbackShakeDestination {
+    if showsRecordAction(
+      capabilities: capabilities, recordingAvailable: recordingAvailable
+    ) { return .prompt }
     if capabilities.contains(.text) || capabilities.contains(.photoLibrary) { return .composer }
     return .none
   }

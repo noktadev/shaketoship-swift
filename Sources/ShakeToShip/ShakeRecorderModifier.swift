@@ -1,11 +1,37 @@
 import Foundation
 
+/// Removes a failed capture before the outbox can discover it and returns the
+/// message the host presents. Kept outside the UIKit gate so the package test
+/// target can prove the disk state after a real writer failure.
+enum FeedbackCaptureFailureRecovery {
+  static func recover(
+    error: Error, in directory: URL, fileManager: FileManager = .default
+  ) -> String {
+    try? fileManager.removeItem(at: directory)
+    return "Recording failed: \(error.localizedDescription)"
+  }
+}
+
+/// Reads device availability only when the host grants screen recording.
+/// This keeps availability as a narrowing condition and avoids ReplayKit work
+/// for text-only and attachment-only hosts.
+enum FeedbackRecordingAvailability {
+  static func current(
+    capabilities: Capabilities,
+    read: @Sendable () async -> Bool
+  ) async -> Bool {
+    guard capabilities.contains(.screenRecording) else { return false }
+    return await read()
+  }
+}
+
 #if canImport(UIKit)
 import SwiftUI
 import UIKit
 
 #if os(iOS) && !targetEnvironment(macCatalyst)
 import ActivityKit
+import ReplayKit
 #endif
 
 extension View {
@@ -41,6 +67,16 @@ extension View {
 
 #if !targetEnvironment(simulator) && !targetEnvironment(macCatalyst)
 
+/// Reads ReplayKit availability away from the main actor. The first
+/// `RPScreenRecorder.shared()` call can perform a synchronous XPC handshake.
+private enum FeedbackReplayKitAvailability {
+  static func current() async -> Bool {
+    await Task.detached {
+      RPScreenRecorder.shared().isAvailable
+    }.value
+  }
+}
+
 /// Root-view modifier: shake while idle → confirm → record; shake while
 /// recording → stop → upload. Small red-dot HUD while recording.
 ///
@@ -49,6 +85,17 @@ extension View {
 /// pure shake-gate decisions in `FeedbackGate` / `FeedbackPromptGate`.
 struct ShakeRecorderModifier: ViewModifier {
   let config: ShakeToShipConfig
+  private let recordingAvailable: @Sendable () async -> Bool
+
+  init(
+    config: ShakeToShipConfig,
+    recordingAvailable: @escaping @Sendable () async -> Bool = {
+      await FeedbackReplayKitAvailability.current()
+    }
+  ) {
+    self.config = config
+    self.recordingAvailable = recordingAvailable
+  }
 
   @State private var isRecording = false
   @State private var showConfirm = false
@@ -154,7 +201,7 @@ struct ShakeRecorderModifier: ViewModifier {
 
   func body(content: Content) -> some View {
     content
-      .background(ShakeDetector { handleShake() })
+      .background(ShakeDetector { Task { await handleShake() } })
       .overlay(alignment: .top) {
         if recordingBarVisible {
           FeedbackRecordingBar(microphoneAllowed: config.capabilities.contains(.microphone)) {
@@ -276,7 +323,7 @@ struct ShakeRecorderModifier: ViewModifier {
         // (Settings "Send feedback now") drives the exact same handleShake()
         // path a physical shake does, so cooldown/rate-cap/busy suppression
         // and the confirm-sheet flow are never duplicated.
-        FeedbackManualTrigger.register { handleShake() }
+        FeedbackManualTrigger.register { Task { await handleShake() } }
       }
       .onDisappear {
         // Gate flipped off / view torn down: unregister so a stale closure
@@ -285,7 +332,7 @@ struct ShakeRecorderModifier: ViewModifier {
       }
   }
 
-  private func handleShake() {
+  private func handleShake() async {
     let action = FeedbackPromptGate.action(
       isRecording: isRecording,
       busy: busy,
@@ -303,7 +350,11 @@ struct ShakeRecorderModifier: ViewModifier {
       // opens the composer directly rather than adding a tap that can only
       // ever mean "Write". A host that can neither record nor compose gets
       // nothing at all.
-      switch FeedbackComposerRules.shakeDestination(capabilities: config.capabilities) {
+      let isRecordingAvailable = await FeedbackRecordingAvailability.current(
+        capabilities: config.capabilities, read: recordingAvailable)
+      switch FeedbackComposerRules.shakeDestination(
+        capabilities: config.capabilities, recordingAvailable: isRecordingAvailable
+      ) {
       case .none:
         break
       case .prompt:
@@ -589,8 +640,7 @@ struct ShakeRecorderModifier: ViewModifier {
       } catch {
         // Writer failed / finalize error: surface alert, discard dir, do NOT
         // enqueue an upload of a corrupt MOV.
-        try? FileManager.default.removeItem(at: dir)
-        errorMessage = "Recording failed: \(error.localizedDescription)"
+        errorMessage = FeedbackCaptureFailureRecovery.recover(error: error, in: dir)
       }
     }
     busy = false
