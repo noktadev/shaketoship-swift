@@ -66,17 +66,12 @@ struct FeedbackPhotoPicker: UIViewControllerRepresentable {
         parent.onFinish(.empty)
         return
       }
-      // `sending`, because `NSItemProvider` is not Sendable and `ingest` is
-      // nonisolated: handing it the array crosses an isolation boundary. The
-      // array is built fresh here and read nowhere else afterwards, so the
-      // transfer is genuinely exclusive and `sending` states that rather than
-      // suppressing it.
-      //
-      // Xcode 26.3 accepts this without the annotation; the toolchain Xcode
-      // Cloud tracks as "Latest Release" does not, and failed every archive
-      // from 2026-08-14 with "Sending 'providers' risks causing data races" -
-      // including builds whose commits changed nothing here. It is a real
-      // boundary either way, so it is annotated rather than pinned around.
+      // These providers stay on the main actor from here to the file copy -
+      // `ingest` is `@MainActor` precisely so this array never crosses an
+      // isolation boundary. `NSItemProvider` is not Sendable, and marking the
+      // parameter `sending` does NOT work: a `sending` argument has to be
+      // disconnected, and these are born inside a `@MainActor` delegate
+      // callback, so they already belong to the main actor's region.
       let providers = results.map(\.itemProvider)
       let parent = parent
       Task { @MainActor in
@@ -99,8 +94,25 @@ struct FeedbackPhotoPicker: UIViewControllerRepresentable {
 /// passed `FeedbackAttachmentBounds.admit`, and anything refused is deleted
 /// rather than left in the session dir where the uploader would find it.
 enum FeedbackAttachmentIntake {
+  /// `@MainActor`, so the picked providers never cross an isolation boundary.
+  ///
+  /// `NSItemProvider` is not Sendable, and these come from a `@MainActor`
+  /// delegate callback, so they are already part of the main actor's region.
+  /// That is why `sending` cannot help: `sending` hands over a DISCONNECTED
+  /// value, and a value born on the main actor is not disconnected. Xcode 26.3
+  /// let the call through unannotated; Xcode 27 rejects it, which is what
+  /// failed every Xcode Cloud archive from 2026-08-14.
+  ///
+  /// Isolating to the main actor costs nothing here, because none of the
+  /// expensive work runs on the caller's thread anyway: `reencodeJPEG` hops
+  /// through `Task.detached`, `copyFile` does its copy inside the provider's
+  /// own completion handler on whatever queue the provider chose, and
+  /// `videoDuration` is async AVFoundation. Only the provider-touching
+  /// functions are isolated; the data-only helpers stay nonisolated so the
+  /// decode and re-encode remain off the main thread.
+  @MainActor
   static func ingest(
-    providers: sending [NSItemProvider],
+    providers: [NSItemProvider],
     stagingDirectory: URL,
     maxAttachmentDuration: TimeInterval,
     existingCount: Int,
@@ -151,6 +163,7 @@ enum FeedbackAttachmentIntake {
     let candidate: FeedbackAttachmentCandidate
   }
 
+  @MainActor
   private static func stage(provider: NSItemProvider, in directory: URL) async -> Staged? {
     let name = UUID().uuidString
     if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
@@ -177,6 +190,7 @@ enum FeedbackAttachmentIntake {
 
   /// The provider's file is deleted the moment the completion handler returns,
   /// so the copy happens inside it rather than after an await.
+  @MainActor
   private static func copyFile(provider: NSItemProvider, to destination: URL) async -> Bool {
     await withCheckedContinuation { continuation in
       provider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, _ in
@@ -198,6 +212,7 @@ enum FeedbackAttachmentIntake {
     }
   }
 
+  @MainActor
   private static func loadData(provider: NSItemProvider, type: String) async -> Data? {
     await withCheckedContinuation { continuation in
       provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in
