@@ -234,21 +234,24 @@ actor FeedbackRecorder {
     // only Sendable locals and mark the closure @Sendable/nonisolated.
     let interruption = onInterruption
     try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-      recorder.startCapture(
-        handler: { @Sendable sample, bufferType, error in
-          // ReplayKit delivers on its own serial queue; append synchronously so
-          // sample order is preserved and a stop() cannot interleave with a
-          // half-processed buffer (a stray unstructured Task could append after
-          // markAsFinished and corrupt the MOV).
-          guard error == nil else {
-            interruption?()
-            return
-          }
-          sink.append(sample, of: bufferType)
-        },
-        completionHandler: { error in
-          if let error { cont.resume(throwing: error) } else { cont.resume() }
-        })
+      // ReplayKit delivers on its own serial queue; append synchronously so
+      // sample order is preserved and a stop() cannot interleave with a
+      // half-processed buffer (a stray unstructured Task could append after
+      // markAsFinished and corrupt the MOV).
+      let capture: FeedbackCaptureBlock = { sample, bufferType, error in
+        guard error == nil else {
+          interruption?()
+          return
+        }
+        // A nil buffer with no error is a frame ReplayKit could not produce.
+        // Drop it; it is not an interruption.
+        guard let sample else { return }
+        sink.append(sample, of: bufferType)
+      }
+      let completion: FeedbackCaptureCompletionBlock = { error in
+        if let error { cont.resume(throwing: error) } else { cont.resume() }
+      }
+      FeedbackReplayKitStart.startCapture(on: recorder, handler: capture, completion: completion)
     }
 
     // Only publish recorder state after ReplayKit confirmed the capture started.
