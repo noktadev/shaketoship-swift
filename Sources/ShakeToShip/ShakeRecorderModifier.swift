@@ -183,31 +183,40 @@ struct ShakeRecorderModifier: ViewModifier {
     }
   }
 
-  /// #474: island-first. An island device relies on the Live Activity as the
-  /// SOLE in-app indicator (no bar) - but ONLY while that Live Activity is
-  /// actually running. Show the slim top bar whenever the device has no
-  /// island OR no Live Activity is live (`activityBox == nil`: the user has
-  /// Live Activities disabled, the request failed, the OS predates them, or -
-  /// like dotself - the app ships no widget target). That guarantees every
-  /// recording has a visible indicator AND a stop affordance (tap to stop),
-  /// alongside shake-to-stop and the Live Activity STOP button.
+
+  /// Paused = the logical session is still open but no segment is capturing.
+  /// The cursor says so in place of the timer, which is the whole point: a
+  /// mistaken app-switch should look recoverable, not finished.
+  private var recordingPaused: Bool { recordingSession != nil && !isRecording && !busy }
+
+  /// The cursor shows for the whole session, paused included.
   ///
-  /// #943: `liveActivityPending` covers the new window where the request is
-  /// still in flight. Without it an island device would show the bar for the
-  /// frame or two before the handle lands and then yank it away.
-  private var recordingBarVisible: Bool {
-    isRecording && (!FeedbackDeviceCapability.current || (activityBox == nil && !liveActivityPending))
+  /// Unlike the bar it replaces, this is NOT suppressed on Dynamic Island
+  /// devices. The bar was only an indicator, so a Live Activity made it
+  /// redundant; the cursor is also the annotation pen and the transport, and
+  /// hiding it would leave island users with no pen at all.
+  private var recordingCursorVisible: Bool { isRecording || recordingPaused }
+
+  /// Start instant the cursor counts from. Derived from accumulated capture
+  /// time, so a pause/resume cycle continues the clock instead of restarting it.
+  private var cursorStartedAt: Date? {
+    guard recordingSession != nil else { return nil }
+    return Date().addingTimeInterval(-capturedDuration)
   }
 
   func body(content: Content) -> some View {
     content
       .background(ShakeDetector { Task { await handleShake() } })
-      .overlay(alignment: .top) {
-        if recordingBarVisible {
-          FeedbackRecordingBar(microphoneAllowed: config.capabilities.contains(.microphone)) {
-            Task { await stopRecording(.user) }
-          }
-          .ignoresSafeArea(edges: .top)
+      .overlay(alignment: .topLeading) {
+        if recordingCursorVisible, let startedAt = cursorStartedAt {
+          FeedbackRecordingCursor(
+            microphoneAllowed: config.capabilities.contains(.microphone),
+            paused: recordingPaused,
+            startedAt: startedAt,
+            onStop: { Task { await stopRecording(.user) } },
+            onTogglePause: {
+              Task { recordingPaused ? await resumeRecording() : await pauseRecording() }
+            })
         }
       }
       // Toast sits top-center; the recording bar is only shown on non-island
@@ -225,7 +234,7 @@ struct ShakeRecorderModifier: ViewModifier {
       .overlay(alignment: .top) {
         if isRecording, shakeStopHintVisible {
           FeedbackShakeStopHint()
-            .padding(.top, recordingBarVisible ? 56 : 8)
+            .padding(.top, 8)
             .allowsHitTesting(false)
             .animation(.easeInOut(duration: 0.2), value: shakeStopHintVisible)
         }

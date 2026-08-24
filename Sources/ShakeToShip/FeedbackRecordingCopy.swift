@@ -15,4 +15,17 @@ public enum FeedbackRecordingCopy {
   /// shakes to start has no other cue that shaking again is how they stop.
   static let shakeAgainToStopHint = "Shake again to stop."
   static let shakeAgainToStopAccessibilityLabel = "Shake again to stop the recording."
+
+  /// Recording cursor. Icon-only controls, so these strings exist for VoiceOver
+  /// rather than for display - the one exception is `pausedLabel`, which reads
+  /// in place of the timer.
+  static let pausedLabel = "Paused"
+  static let pauseAction = "Pause recording"
+  static let resumeAction = "Resume recording"
+  static let stopAction = "Stop and review"
+  static let muteAction = "Mute microphone"
+  static let unmuteAction = "Unmute microphone"
+  /// Shown once on the first recording: a draggable cursor is not a discoverable
+  /// affordance on its own.
+  static let cursorHint = "Drag to point. Double tap for controls."
 }

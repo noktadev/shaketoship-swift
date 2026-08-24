@@ -1,6 +1,6 @@
 import CoreGraphics
 
-/// Sizing for the in-app recording indicator drawn by `FeedbackRecordingBar`.
+/// Sizing for the recording status dot drawn by `FeedbackRecordingCursor`.
 ///
 /// Deliberately outside the view's `#if canImport(UIKit)` guard: the view only
 /// compiles on UIKit platforms, so metrics kept inside it would compile out of
