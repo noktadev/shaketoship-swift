@@ -134,6 +134,16 @@ struct FeedbackRecordingBar: View {
       .buttonStyle(.plain)
       .accessibilityHidden(true)
     }
+    // The two `maxHeight: .infinity` hit areas above mean "fill the ROW",
+    // but nothing bounded the row: the HStack inherited the overlay's full
+    // height, so `.ultraThinMaterial` blurred the ENTIRE screen and the stop
+    // buttons became screen-sized targets. The app was visible but unusable
+    // mid-recording, which defeats the point of recording it (#1183).
+    //
+    // `fixedSize` vertically pins the row to its own ideal height, so those
+    // hit areas stretch to the row and stop there. NOT a fixed `height:` -
+    // the row must still grow with Dynamic Type rather than clip its text.
+    .fixedSize(horizontal: false, vertical: true)
     .padding(.horizontal, 16)
     .padding(.vertical, 8)
     .frame(maxWidth: .infinity)
