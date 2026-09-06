@@ -15,4 +15,15 @@ import Testing
     #expect(bitrate >= 4_000_000)
     #expect(bitrate <= 10_000_000)
   }
+
+  @Test func defaultCaptureFitsTheServerUploadLimitWithSafetyMargin() {
+    let duration = ShakeToShipConfig.defaultMaxDuration
+    let videoBits = duration * Double(FeedbackRecorderSettings.screenContentBitrate)
+    let narrationBits = duration * Double(FeedbackRecorderSettings.narrationBitrate)
+    let estimatedBytes = (videoBits + narrationBits) / 8
+
+    #expect(
+      estimatedBytes * 1.2
+        < Double(ShakeToShipConfig.serverUploadLimitBytes))
+  }
 }

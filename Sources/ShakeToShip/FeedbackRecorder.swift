@@ -55,7 +55,7 @@ enum FeedbackCaptureInputs {
           AVFormatIDKey: kAudioFormatMPEG4AAC,
           AVNumberOfChannelsKey: 1,
           AVSampleRateKey: 44_100,
-          AVEncoderBitRateKey: 64_000,
+          AVEncoderBitRateKey: FeedbackRecorderSettings.narrationBitrate,
         ])
       input.expectsMediaDataInRealTime = true
       audio = input

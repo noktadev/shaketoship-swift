@@ -25,6 +25,60 @@ enum FeedbackRecordingAvailability {
   }
 }
 
+/// Upload status shown by the package UI.
+enum FeedbackHUDState {
+  case uploaded
+  case queued
+  case unqueued
+  case recordingTooLarge
+  case rejected
+
+  static func status(
+    for result: FeedbackUploadResult, confirmed: Bool
+  ) -> FeedbackHUDState {
+    switch result {
+    case .uploaded: .uploaded
+    case .retryableFailure: confirmed ? .queued : .unqueued
+    case .recordingTooLarge: .recordingTooLarge
+    case .rejected: .rejected
+    }
+  }
+
+  static func status(for sweep: OutboxSweepResult) -> FeedbackHUDState? {
+    if sweep.recordingTooLarge > 0 { return .recordingTooLarge }
+    if sweep.rejected > 0 { return .rejected }
+    if sweep.queued > 0 { return .queued }
+    if sweep.flushed > 0 { return .uploaded }
+    return nil
+  }
+
+  var symbol: String {
+    switch self {
+    case .uploaded: "checkmark.circle.fill"
+    case .queued: "arrow.clockwise"
+    case .unqueued, .recordingTooLarge, .rejected: "exclamationmark.triangle.fill"
+    }
+  }
+
+  var text: String {
+    switch self {
+    case .uploaded: "Feedback uploaded"
+    case .queued: "Upload queued - retries next launch"
+    case .unqueued: "Could not queue - keep app open"
+    case .recordingTooLarge: "Recording too large to send"
+    case .rejected: "Recording could not be sent"
+    }
+  }
+
+  var outcome: String {
+    switch self {
+    case .uploaded: "uploaded"
+    case .queued: "queued"
+    case .unqueued, .recordingTooLarge, .rejected: "unqueued"
+    }
+  }
+}
+
 #if canImport(UIKit)
 import SwiftUI
 import UIKit
@@ -794,15 +848,15 @@ struct ShakeRecorderModifier: ViewModifier {
       let uploader = FeedbackUploader(
         config: config, transport: URLSessionTransport(),
         fileManager: .default, outboxRoot: root)
-      let ok = await uploader.flush(sessionId: data.id)
-      if ok {
+      let result = await uploader.upload(sessionId: data.id)
+      let state = FeedbackHUDState.status(for: result, confirmed: confirmed)
+      if result == .uploaded {
         FeedbackHaptics.success()
-        showHUD(.uploaded)
       } else {
         FeedbackHaptics.warning()
-        showHUD(confirmed ? .queued : .unqueued)
       }
-      config.onFunnelEvent?(.uploadResult(outcome: ok ? "uploaded" : (confirmed ? "queued" : "unqueued")))
+      showHUD(state)
+      config.onFunnelEvent?(.uploadResult(outcome: state.outcome))
     }
     // A second interrupted partial may still be waiting - offer it now that this
     // review has closed, instead of waiting for the next foreground.
@@ -1011,12 +1065,13 @@ struct ShakeRecorderModifier: ViewModifier {
         // Queued wins over flushed: "uploaded" must never mask retained files.
         // Same haptics as the stop-flush path: warning for queued, success for
         // uploaded.
-        if result.queued > 0 {
-          FeedbackHaptics.warning()
-          showHUD(.queued)
-        } else if result.flushed > 0 {
-          FeedbackHaptics.success()
-          showHUD(.uploaded)
+        if let state = FeedbackHUDState.status(for: result) {
+          if case .uploaded = state {
+            FeedbackHaptics.success()
+          } else {
+            FeedbackHaptics.warning()
+          }
+          showHUD(state)
         }
       }
     }
@@ -1147,34 +1202,12 @@ private struct FeedbackPromptSheet: View {
   }
 }
 
-/// Upload-result toast states.
-private enum FeedbackHUDState {
-  case uploaded  // reached R2
-  case queued    // retained for next-launch retry (marker on disk)
-  case unqueued  // upload failed AND the confirm marker could not be written:
-                 // the launch sweep will not retry this session
-
-  var symbol: String {
-    switch self {
-    case .uploaded: return "checkmark.circle.fill"
-    case .queued: return "arrow.clockwise"
-    case .unqueued: return "exclamationmark.triangle.fill"
-    }
-  }
-
-  var text: String {
-    switch self {
-    case .uploaded: return "Feedback uploaded"
-    case .queued: return "Upload queued - retries next launch"
-    case .unqueued: return "Could not queue - keep app open"
-    }
-  }
-
+private extension FeedbackHUDState {
   var tint: Color {
     switch self {
     case .uploaded: return .green
     case .queued: return .orange
-    case .unqueued: return .red
+    case .unqueued, .recordingTooLarge, .rejected: return .red
     }
   }
 }

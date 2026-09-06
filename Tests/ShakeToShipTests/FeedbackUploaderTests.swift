@@ -364,18 +364,207 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.json").path))
   }
 
-  @Test func presignFailureRetainsLocalFiles() async throws {
-    let root = try makeOutbox(sessionId: "s1")
-    let dir = root.appendingPathComponent("s1")
-    let transport = FakeTransport([.init(status: 401, data: Data())])
-    let uploader = FeedbackUploader(
+  @Test func recordingTooLargeIsPreservedAndNotRetriedAfterRelaunch() async throws {
+    let root = try makeOutbox(sessionId: "too-large")
+    let dir = root.appendingPathComponent("too-large")
+    try Data("Steps to reproduce".utf8).write(
+      to: dir.appendingPathComponent(FeedbackAttachmentNaming.noteFile))
+    let presign = Data(
+      #"{"urls":{"recording.mov":"https://r2.example.com/mov","events.json":"https://r2.example.com/json","note.txt":"https://r2.example.com/note","complete.json":"https://r2.example.com/complete"}}"#.utf8)
+    let firstTransport = FakeTransport([
+      .init(status: 200, data: presign),
+      .init(status: 200, data: Data()),
+      .init(status: 413, data: Data()),
+    ])
+    let firstUploader = uploader(root, firstTransport)
+
+    let firstResult = await firstUploader.upload(sessionId: "too-large")
+
+    #expect(firstResult == .recordingTooLarge)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: dir.appendingPathComponent(FeedbackAttachmentNaming.noteFile).path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("complete.json").path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".upload-failure.json").path))
+    #expect(firstTransport.uploads.map(\.file.lastPathComponent) == [
+      "events.json", "recording.mov",
+    ])
+    let markerData = try Data(contentsOf: dir.appendingPathComponent(".upload-failure.json"))
+    let marker = try #require(
+      try JSONSerialization.jsonObject(with: markerData) as? [String: Any])
+    #expect(marker["statusCode"] as? Int == 413)
+
+    let relaunchedTransport = FakeTransport([])
+    let relaunchedUploader = uploader(root, relaunchedTransport)
+    let sweep = await relaunchedUploader.retryOutbox()
+
+    #expect(
+      sweep
+        == OutboxSweepResult(
+          flushed: 0, queued: 0, purged: 0, recordingTooLarge: 1,
+          rejected: 0))
+    #expect(relaunchedTransport.requests.isEmpty)
+    #expect(relaunchedTransport.uploads.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path))
+  }
+
+  @Test(arguments: [401, 403])
+  func objectPutAuthorizationFailureRetriesWithFreshPresignAfterRelaunch(status: Int) async throws {
+    let root = try makeOutbox(sessionId: "expired-ticket-\(status)")
+    let dir = root.appendingPathComponent("expired-ticket-\(status)")
+    let firstTransport = FakeTransport([
+      .init(status: 200, data: presignBody()),
+      .init(status: status, data: Data()),
+    ])
+
+    let firstResult = await uploader(root, firstTransport).upload(
+      sessionId: "expired-ticket-\(status)")
+
+    #expect(firstResult == .retryableFailure)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.json").path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("complete.json").path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: dir.appendingPathComponent(".upload-failure.json").path) == false)
+    #expect(firstTransport.uploads.map(\.file.lastPathComponent) == ["events.json"])
+
+    let relaunchedTransport = FakeTransport([
+      .init(status: 200, data: presignBody()),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+    ])
+    let sweep = await uploader(root, relaunchedTransport).retryOutbox()
+
+    #expect(sweep == OutboxSweepResult(flushed: 1, queued: 0, purged: 0))
+    #expect(relaunchedTransport.requests.count == 1)
+    #expect(relaunchedTransport.uploads.map(\.file.lastPathComponent) == [
+      "events.json", "recording.mov", "complete.json",
+    ])
+    #expect(FileManager.default.fileExists(atPath: dir.path) == false)
+  }
+
+  @Test(arguments: [401, 403])
+  func completionPutAuthorizationFailureRetriesWithFreshPresignAfterRelaunch(
+    status: Int
+  ) async throws {
+    let root = try makeOutbox(sessionId: "expired-completion-ticket-\(status)")
+    let dir = root.appendingPathComponent("expired-completion-ticket-\(status)")
+    let firstTransport = FakeTransport([
+      .init(status: 200, data: presignBody()),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+      .init(status: status, data: Data()),
+    ])
+
+    let firstResult = await uploader(root, firstTransport).upload(
+      sessionId: "expired-completion-ticket-\(status)")
+
+    #expect(firstResult == .retryableFailure)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.json").path) == false)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path) == false)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("complete.json").path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: dir.appendingPathComponent(".upload-failure.json").path) == false)
+
+    let completionPresign = Data(
+      #"{"urls":{"complete.json":"https://r2.example.com/fresh-complete"}}"#.utf8)
+    let relaunchedTransport = FakeTransport([
+      .init(status: 200, data: completionPresign),
+      .init(status: 200, data: Data()),
+    ])
+    let sweep = await uploader(root, relaunchedTransport).retryOutbox()
+
+    #expect(sweep == OutboxSweepResult(flushed: 1, queued: 0, purged: 0))
+    let body = try #require(relaunchedTransport.requests.first?.httpBody)
+    let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+    #expect(json["files"] as? [String] == ["complete.json"])
+    #expect(relaunchedTransport.uploads.map(\.file.lastPathComponent) == ["complete.json"])
+    #expect(FileManager.default.fileExists(atPath: dir.path) == false)
+  }
+
+  @Test(arguments: [429, 500])
+  func transientHTTPFailureRetriesAfterRelaunch(status: Int) async throws {
+    let root = try makeOutbox(sessionId: "transient-\(status)")
+    let dir = root.appendingPathComponent("transient-\(status)")
+    let transport = FakeTransport([
+      .init(status: 200, data: presignBody()),
+      .init(status: status, data: Data()),
+      .init(status: 200, data: presignBody()),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+    ])
+
+    let firstResult = await uploader(root, transport).upload(sessionId: "transient-\(status)")
+
+    #expect(firstResult == .retryableFailure)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.json").path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: dir.appendingPathComponent(".upload-failure.json").path) == false)
+
+    let sweep = await uploader(root, transport).retryOutbox()
+
+    #expect(sweep == OutboxSweepResult(flushed: 1, queued: 0, purged: 0))
+    #expect(FileManager.default.fileExists(atPath: dir.path) == false)
+  }
+
+  @Test(arguments: [401, 403])
+  func presignAuthorizationFailureRetainsLocalFilesAndStaysTerminal(status: Int) async throws {
+    let root = try makeOutbox(sessionId: "presign-rejected-\(status)")
+    let dir = root.appendingPathComponent("presign-rejected-\(status)")
+    let transport = FakeTransport([.init(status: status, data: Data())])
+    let firstUploader = FeedbackUploader(
       config: makeConfig(), transport: transport,
       fileManager: .default, outboxRoot: root)
 
-    let ok = await uploader.flush(sessionId: "s1")
+    let result = await firstUploader.upload(sessionId: "presign-rejected-\(status)")
 
-    #expect(ok == false)
+    #expect(result == .rejected(statusCode: status))
     #expect(FileManager.default.fileExists(atPath: dir.path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.json").path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".upload-failure.json").path))
+
+    let relaunchedTransport = FakeTransport([])
+    let sweep = await uploader(root, relaunchedTransport).retryOutbox()
+
+    #expect(
+      sweep
+        == OutboxSweepResult(
+          flushed: 0, queued: 0, purged: 0, recordingTooLarge: 0,
+          rejected: 1))
+    #expect(relaunchedTransport.requests.isEmpty)
+  }
+
+  @Test func presignTooLargeRetainsLocalFilesAndStaysTerminal() async throws {
+    let root = try makeOutbox(sessionId: "presign-too-large")
+    let dir = root.appendingPathComponent("presign-too-large")
+    let transport = FakeTransport([.init(status: 413, data: Data())])
+
+    let result = await uploader(root, transport).upload(sessionId: "presign-too-large")
+
+    #expect(result == .recordingTooLarge)
+    #expect(transport.uploads.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.json").path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path))
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".upload-failure.json").path))
+
+    let relaunchedTransport = FakeTransport([])
+    let sweep = await uploader(root, relaunchedTransport).retryOutbox()
+
+    #expect(
+      sweep
+        == OutboxSweepResult(
+          flushed: 0, queued: 0, purged: 0, recordingTooLarge: 1,
+          rejected: 0))
+    #expect(relaunchedTransport.requests.isEmpty)
+    #expect(relaunchedTransport.uploads.isEmpty)
   }
 
   @Test func retryOutboxSweepsAllSessionDirs() async throws {

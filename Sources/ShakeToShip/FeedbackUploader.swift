@@ -36,13 +36,35 @@ struct URLSessionTransport: FeedbackTransport {
 enum FeedbackUploadError: Error {
   case notHTTP
   case missingPresignedURL(String)
+  case presignHTTPStatus(Int)
 }
 
 /// Completion object uploaded only after every evidence file reaches storage.
 private let feedbackCompletionFile = "complete.json"
 private let feedbackCompletionBody = Data(#"{"version":1}"#.utf8)
 private let feedbackUploadManifestFile = ".upload-manifest.json"
+private let feedbackPermanentFailureFile = ".upload-failure.json"
 private let shakeToShipSDKVersion = "2.0.0"
+
+enum FeedbackUploadResult: Sendable, Equatable {
+  case uploaded
+  case retryableFailure
+  case recordingTooLarge
+  case rejected(statusCode: Int)
+}
+
+private struct FeedbackPermanentFailure: Codable {
+  let version: Int
+  let statusCode: Int
+
+  var result: FeedbackUploadResult? {
+    switch statusCode {
+    case 413: .recordingTooLarge
+    case 401, 403: .rejected(statusCode: statusCode)
+    default: nil
+    }
+  }
+}
 
 /// Local confirmation marker written into a session dir when the user taps
 /// Upload in the review sheet. NEVER uploaded - the evidence plan does not
@@ -164,17 +186,24 @@ func pendingInterruptedSessions(
 }
 
 /// Tally of one `retryOutbox()` sweep. `flushed` = dirs uploaded and removed;
-/// `queued` = dirs with files that failed upload (retained for next launch);
-/// `purged` = zero-whitelisted-file dirs (crashed sessions) deleted.
+/// `queued` = dirs with retryable failures; `purged` = stale incomplete dirs;
+/// the other counts are retained dirs with permanent failure markers.
 struct OutboxSweepResult: Sendable, Equatable {
   let flushed: Int
   let queued: Int
   let purged: Int
+  let recordingTooLarge: Int
+  let rejected: Int
 
-  init(flushed: Int, queued: Int, purged: Int) {
+  init(
+    flushed: Int, queued: Int, purged: Int,
+    recordingTooLarge: Int = 0, rejected: Int = 0
+  ) {
     self.flushed = flushed
     self.queued = queued
     self.purged = purged
+    self.recordingTooLarge = recordingTooLarge
+    self.rejected = rejected
   }
 }
 
@@ -230,18 +259,23 @@ struct FeedbackUploader {
     let urls: [String: String]
   }
 
-  /// Uploads `<outboxRoot>/<sessionId>/`. Presigns and PUTs only the whitelisted
-  /// files that actually exist on disk (a dir missing one file still uploads the
-  /// other instead of retrying forever). Returns true only when every uploaded
-  /// file reached R2 AND the local dir was successfully removed; false on any
-  /// upload OR deletion failure.
+  /// Compatibility result for callers that only need success or failure.
   @discardableResult
   func flush(sessionId: String) async -> Bool {
+    await upload(sessionId: sessionId) == .uploaded
+  }
+
+  /// Uploads one outbox session and records permanent HTTP failures in its dir.
+  /// A later process reads that marker before any request and keeps all local
+  /// files that were not already uploaded successfully.
+  @discardableResult
+  func upload(sessionId: String) async -> FeedbackUploadResult {
     let dir = outboxRoot.appendingPathComponent(sessionId, isDirectory: true)
-    guard let present = existingFiles(in: dir) else { return false }
+    if let failure = permanentFailure(in: dir) { return failure }
+    guard let present = existingFiles(in: dir) else { return .retryableFailure }
     let completionURL = dir.appendingPathComponent(feedbackCompletionFile)
     let completionPending = fileManager.fileExists(atPath: completionURL.path)
-    guard !present.isEmpty || completionPending else { return false }
+    guard !present.isEmpty || completionPending else { return .retryableFailure }
     do {
       let manifest = try await persistedManifest(in: dir, files: present)
       if !completionPending {
@@ -252,16 +286,49 @@ struct FeedbackUploader {
         files: present + [feedbackCompletionFile],
         manifest: manifest)
       for name in present {
-        guard try await upload(name, from: dir, urls: urls) else { return false }
+        let result = try await upload(name, from: dir, urls: urls)
+        guard result == .uploaded else {
+          persistPermanentFailure(result, in: dir)
+          return result
+        }
         try fileManager.removeItem(at: dir.appendingPathComponent(name))
       }
-      guard try await upload(feedbackCompletionFile, from: dir, urls: urls) else { return false }
+      let completionResult = try await upload(feedbackCompletionFile, from: dir, urls: urls)
+      guard completionResult == .uploaded else {
+        persistPermanentFailure(completionResult, in: dir)
+        return completionResult
+      }
       try fileManager.removeItem(at: completionURL)
       try fileManager.removeItem(at: dir)
-      return true
+      return .uploaded
+    } catch FeedbackUploadError.presignHTTPStatus(let statusCode) {
+      let result = Self.presignResult(for: statusCode)
+      persistPermanentFailure(result, in: dir)
+      return result
     } catch {
-      return false
+      return .retryableFailure
     }
+  }
+
+  private func permanentFailure(in dir: URL) -> FeedbackUploadResult? {
+    let url = dir.appendingPathComponent(feedbackPermanentFailureFile)
+    guard
+      let data = try? Data(contentsOf: url),
+      let marker = try? JSONDecoder().decode(FeedbackPermanentFailure.self, from: data)
+    else { return nil }
+    return marker.result
+  }
+
+  private func persistPermanentFailure(_ result: FeedbackUploadResult, in dir: URL) {
+    let statusCode: Int
+    switch result {
+    case .recordingTooLarge: statusCode = 413
+    case .rejected(let rejectedStatusCode): statusCode = rejectedStatusCode
+    case .uploaded, .retryableFailure: return
+    }
+    let marker = FeedbackPermanentFailure(version: 1, statusCode: statusCode)
+    let url = dir.appendingPathComponent(feedbackPermanentFailureFile)
+    try? JSONEncoder().encode(marker).write(to: url, options: .atomic)
   }
 
   /// Evidence files that exist in `dir`, in deterministic upload order.
@@ -301,7 +368,9 @@ struct FeedbackUploader {
     return files
   }
 
-  private func upload(_ name: String, from dir: URL, urls: [String: String]) async throws -> Bool {
+  private func upload(
+    _ name: String, from dir: URL, urls: [String: String]
+  ) async throws -> FeedbackUploadResult {
     guard let putURLString = urls[name], let putURL = URL(string: putURLString) else {
       throw FeedbackUploadError.missingPresignedURL(name)
     }
@@ -312,7 +381,24 @@ struct FeedbackUploader {
     }
     let (_, response) = try await transport.upload(
       req, fromFile: dir.appendingPathComponent(name))
-    return response.statusCode == 200
+    return Self.objectPutResult(for: response.statusCode)
+  }
+
+  private static func objectPutResult(for statusCode: Int) -> FeedbackUploadResult {
+    switch statusCode {
+    case 200: .uploaded
+    case 413: .recordingTooLarge
+    default: .retryableFailure
+    }
+  }
+
+  private static func presignResult(for statusCode: Int) -> FeedbackUploadResult {
+    switch statusCode {
+    case 200: .uploaded
+    case 413: .recordingTooLarge
+    case 401, 403: .rejected(statusCode: statusCode)
+    default: .retryableFailure
+    }
   }
 
   private static func isAdditionalSegment(_ name: String) -> Bool {
@@ -342,7 +428,7 @@ struct FeedbackUploader {
         transcribe: manifest.transcribe))
     let (data, resp) = try await transport.perform(req)
     guard resp.statusCode == 200 else {
-      throw FeedbackUploadError.missingPresignedURL("presign status \(resp.statusCode)")
+      throw FeedbackUploadError.presignHTTPStatus(resp.statusCode)
     }
     return try JSONDecoder().decode(PresignResponse.self, from: data).urls
   }
@@ -436,6 +522,8 @@ struct FeedbackUploader {
     var flushed = 0
     var queued = 0
     var purged = 0
+    var recordingTooLarge = 0
+    var rejected = 0
     for entry in entries {
       let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
       guard isDir else { continue }
@@ -478,13 +566,16 @@ struct FeedbackUploader {
         purgeIfStale(entry, purgeAge: purgeAge, purged: &purged)
         continue
       }
-      if await flush(sessionId: entry.lastPathComponent) {
-        flushed += 1
-      } else {
-        queued += 1
+      switch await upload(sessionId: entry.lastPathComponent) {
+      case .uploaded: flushed += 1
+      case .retryableFailure: queued += 1
+      case .recordingTooLarge: recordingTooLarge += 1
+      case .rejected: rejected += 1
       }
     }
-    return OutboxSweepResult(flushed: flushed, queued: queued, purged: purged)
+    return OutboxSweepResult(
+      flushed: flushed, queued: queued, purged: purged,
+      recordingTooLarge: recordingTooLarge, rejected: rejected)
   }
 
   /// Removes `entry` and bumps `purged` only once it is older than `purgeAge`

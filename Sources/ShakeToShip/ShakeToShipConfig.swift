@@ -48,6 +48,8 @@ public struct ShakeToShipConfig: Sendable {
   /// (e.g. a host's safety timer) derive bounds from it instead of duplicating
   /// the constant.
   public static let defaultMaxDuration: TimeInterval = 300
+  /// Must match `MAX_UPLOAD_BYTES` in the ShakeToShip ingest worker.
+  static let serverUploadLimitBytes = 450 * 1024 * 1024
 
   /// App identifier sent to the collector (e.g. `"dotself"`).
   public let app: String
