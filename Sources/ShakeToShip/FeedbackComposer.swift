@@ -433,13 +433,18 @@ struct FeedbackComposer: View {
         .buttonStyle(.bordered)
         .disabled(acted)
 
+        // Same pair as the shake prompt's primary action: `.borderedProminent`
+        // on its own inherits the HOST app's tint for the fill and draws the
+        // label white, which is invisible under a near-white tint (#1389).
         Button {
           act { onSend(FeedbackComposerResult(media: media, note: note)) }
         } label: {
           Label("Send", systemImage: "arrow.up.circle.fill")
+            .foregroundStyle(FeedbackPromptButtonColors.labelColor)
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
+        .tint(FeedbackPromptButtonColors.fillColor)
         .disabled(acted || !sendEnabled)
       }
       .padding(.horizontal, 16)

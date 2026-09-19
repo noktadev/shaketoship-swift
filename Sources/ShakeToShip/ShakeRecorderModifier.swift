@@ -1222,10 +1222,17 @@ private struct FeedbackPromptSheet: View {
           .multilineTextAlignment(.center)
       }
       VStack(spacing: 10) {
+        // #1389: `.borderedProminent` alone fills with the HOST app's tint and
+        // draws the label white, so a host that tints near-white in dark mode
+        // shipped a white label on a white button. Both halves of the pair are
+        // pinned here - see `FeedbackPromptButtonColors`.
         Button(action: onRecord) {
-          Text("Record & report").frame(maxWidth: .infinity)
+          Text("Record & report")
+            .foregroundStyle(FeedbackPromptButtonColors.labelColor)
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
+        .tint(FeedbackPromptButtonColors.fillColor)
         if showsWrite {
           // Both actions land in the same composer; this one just gets there
           // with an empty media slot. Quieter than Record on purpose - a
