@@ -1,12 +1,20 @@
+import AppUploads
 import AVFoundation
 import Foundation
 
 /// Injectable HTTP seam so presign/upload logic is unit testable without network.
-protocol FeedbackTransport: Sendable {
+protocol FeedbackTransport: UploadTransport {
   func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse)
   /// Streams `file` from disk as the request body (no full-file `Data` copy) -
   /// used for the recording PUT so a ~100MB video upload never doubles memory.
   func upload(_ request: URLRequest, fromFile file: URL) async throws -> (Data, HTTPURLResponse)
+}
+
+extension FeedbackTransport {
+  func upload(_ request: URLRequest, fromFile file: URL, transferID: String) async throws -> (Data, HTTPURLResponse) {
+    try await upload(request, fromFile: file)
+  }
+  func acknowledge(transferID: String, file: URL) async {}
 }
 
 /// Production transport backed by `URLSession`.
@@ -56,6 +64,7 @@ enum FeedbackUploadResult: Sendable, Equatable {
 private struct FeedbackPermanentFailure: Codable {
   let version: Int
   let statusCode: Int
+  let recoveredCopyRejected: Bool?
 
   var result: FeedbackUploadResult? {
     switch statusCode {
@@ -216,17 +225,20 @@ struct FeedbackUploader {
   private let fileManager: FileManager
   /// Root of `Documents/feedback-outbox`; each session lives in `<root>/<sessionId>/`.
   private let outboxRoot: URL
+  private let recovery: FeedbackVideoRecovery
 
   init(
     config: ShakeToShipConfig,
     transport: FeedbackTransport,
     fileManager: FileManager,
-    outboxRoot: URL
+    outboxRoot: URL,
+    videoCompressor: any FeedbackVideoCompressing = AVFeedbackVideoCompressor()
   ) {
     self.config = config
     self.transport = transport
     self.fileManager = fileManager
     self.outboxRoot = outboxRoot
+    self.recovery = FeedbackVideoRecovery(compressor: videoCompressor, fileManager: fileManager)
   }
 
   private struct PresignRequestBody: Encodable {
@@ -257,6 +269,19 @@ struct FeedbackUploader {
 
   private struct PresignResponse: Decodable {
     let urls: [String: String]
+    let multipart: MultipartUploadCapabilities?
+  }
+
+  private struct UploadedFile: Codable, Equatable {
+    let size: Int
+    let modified: Date
+    static func read(_ file: URL) throws -> Self {
+      let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+      guard let size = values.fileSize, let modified = values.contentModificationDate else {
+        throw MultipartUploadError.originalChanged
+      }
+      return Self(size: size, modified: modified)
+    }
   }
 
   /// Compatibility result for callers that only need success or failure.
@@ -270,40 +295,125 @@ struct FeedbackUploader {
   /// files that were not already uploaded successfully.
   @discardableResult
   func upload(sessionId: String) async -> FeedbackUploadResult {
+    let path = outboxRoot.appendingPathComponent(sessionId).standardizedFileURL.path
+    guard await FeedbackUploadLeases.shared.acquire(path) else { return .retryableFailure }
+    let result = await uploadExclusively(sessionId: sessionId)
+    await FeedbackUploadLeases.shared.release(path)
+    return result
+  }
+
+  private func uploadExclusively(sessionId: String) async -> FeedbackUploadResult {
     let dir = outboxRoot.appendingPathComponent(sessionId, isDirectory: true)
-    if let failure = permanentFailure(in: dir) { return failure }
     guard let present = existingFiles(in: dir) else { return .retryableFailure }
+    let failure = permanentFailure(in: dir)
+    if let failure, failure != .recordingTooLarge { return failure }
+    let videos = present.filter { $0.hasSuffix(".mov") }
+    let largeFiles = videos.filter {
+      ((try? dir.appendingPathComponent($0).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 10 * 1024 * 1024
+    }
+    let largeVideos = videos.filter {
+      ((try? dir.appendingPathComponent($0).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        > FeedbackVideoRecovery.maximumBytes
+    }
+    let existingMultipart = videos.filter {
+      fileManager.fileExists(atPath: dir.appendingPathComponent(".multipart-" + $0).appendingPathComponent("state.json").path)
+    }
+    if failure == .recordingTooLarge || !largeFiles.isEmpty || !existingMultipart.isEmpty || recovery.hasAttempt(in: dir) {
+      guard fileManager.fileExists(atPath: dir.appendingPathComponent(feedbackConfirmedMarker).path) else {
+        return failure ?? (!largeVideos.isEmpty ? .recordingTooLarge : .retryableFailure)
+      }
+    }
     let completionURL = dir.appendingPathComponent(feedbackCompletionFile)
     let completionPending = fileManager.fileExists(atPath: completionURL.path)
     guard !present.isEmpty || completionPending else { return .retryableFailure }
     do {
       let manifest = try await persistedManifest(in: dir, files: present)
-      if !completionPending {
-        try feedbackCompletionBody.write(to: completionURL, options: .atomic)
+      var response: PresignResponse?
+      // Discover multipart before compressing or honoring an old 413 marker.
+      // Old collectors omit the capability and retain build-37 recovery.
+      if failure == .recordingTooLarge || !largeFiles.isEmpty || !existingMultipart.isEmpty || recovery.hasAttempt(in: dir) {
+        response = try await presign(sessionId: sessionId, files: present + [feedbackCompletionFile], manifest: manifest)
       }
-      let urls = try await presign(
-        sessionId: sessionId,
-        files: present + [feedbackCompletionFile],
-        manifest: manifest)
+      let capability = response?.multipart.flatMap { $0.isSupported ? $0 : nil }
+      if !existingMultipart.isEmpty, capability == nil { return .retryableFailure }
+      let oversizedVideos = capability.map { cap in videos.filter {
+        ((try? dir.appendingPathComponent($0).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > cap.effectiveMaximumBytes
+      } } ?? []
+      if !Set(existingMultipart).isDisjoint(with: oversizedVideos) {
+        persistPermanentFailure(.recordingTooLarge, in: dir)
+        return .recordingTooLarge
+      }
+      let multipartFiles = Set(capability == nil ? [] : videos.filter {
+        !oversizedVideos.contains($0) && (largeFiles.contains($0) || existingMultipart.contains($0) || failure == .recordingTooLarge || recovery.hasAttempt(in: dir))
+      })
+      let multipartEnabled = !multipartFiles.isEmpty
+      if multipartEnabled {
+        guard fileManager.fileExists(atPath: dir.appendingPathComponent(feedbackConfirmedMarker).path) else {
+          return .retryableFailure
+        }
+        if !oversizedVideos.isEmpty, !(await recovery.prepare(in: dir, names: oversizedVideos)) {
+          persistPermanentFailure(.recordingTooLarge, in: dir)
+          return .recordingTooLarge
+        }
+        try? fileManager.removeItem(at: dir.appendingPathComponent(feedbackPermanentFailureFile))
+      } else {
+        if failure == .recordingTooLarge, failureMarker(in: dir)?.recoveredCopyRejected == true {
+          return .recordingTooLarge
+        }
+        if failure == .recordingTooLarge || !largeVideos.isEmpty || !oversizedVideos.isEmpty || recovery.hasAttempt(in: dir) {
+          persistPermanentFailure(.recordingTooLarge, in: dir)
+          guard fileManager.fileExists(atPath: dir.appendingPathComponent(feedbackConfirmedMarker).path),
+                await recovery.prepare(in: dir, names: videos) else { return .recordingTooLarge }
+          try fileManager.removeItem(at: dir.appendingPathComponent(feedbackPermanentFailureFile))
+        }
+      }
+      if !completionPending { try feedbackCompletionBody.write(to: completionURL, options: .atomic) }
+      if response == nil {
+        response = try await presign(sessionId: sessionId, files: present + [feedbackCompletionFile], manifest: manifest)
+      }
+      guard let response else { return .retryableFailure }
+      let checkpointURL = dir.appendingPathComponent(".multipart-single-files.json")
+      var uploaded: [String: UploadedFile] = [:]
+      if multipartEnabled, fileManager.fileExists(atPath: checkpointURL.path) {
+        uploaded = try JSONDecoder().decode([String: UploadedFile].self, from: Data(contentsOf: checkpointURL))
+      }
       for name in present {
-        let result = try await upload(name, from: dir, urls: urls)
+        let original = dir.appendingPathComponent(name)
+        if multipartFiles.contains(name), let capability {
+          guard let value = response.urls[name], let url = URL(string: value) else {
+            throw FeedbackUploadError.missingPresignedURL(name)
+          }
+          try await MultipartUploader(transport: transport, fileManager: fileManager).upload(
+            sourceURL: original, stateDirectory: dir.appendingPathComponent(".multipart-" + name),
+            objectID: "\(config.app)/\(sessionId)/\(name)", signedURL: url, capabilities: capability,
+            contentType: "video/quicktime",
+            scheduling: transport.supportsBackgroundUploads ? .backgroundQueued : .bounded)
+          continue
+        }
+        let identity = multipartEnabled ? try UploadedFile.read(original) : nil
+        if let identity, uploaded[name] == identity { continue }
+        let result = try await upload(name, from: dir, urls: response.urls)
         guard result == .uploaded else {
-          persistPermanentFailure(result, in: dir)
+          persistPermanentFailure(result, in: dir, recoveredCopyRejected: recovery.isReady(in: dir))
           return result
         }
-        try fileManager.removeItem(at: dir.appendingPathComponent(name))
+        if let identity {
+          uploaded[name] = identity
+          try JSONEncoder().encode(uploaded).write(to: checkpointURL, options: .atomic)
+        } else if recovery.copy(for: name, in: dir) == nil {
+          try fileManager.removeItem(at: original)
+        }
       }
-      let completionResult = try await upload(feedbackCompletionFile, from: dir, urls: urls)
+      let completionResult = try await upload(feedbackCompletionFile, from: dir, urls: response.urls)
       guard completionResult == .uploaded else {
-        persistPermanentFailure(completionResult, in: dir)
+        persistPermanentFailure(completionResult, in: dir, recoveredCopyRejected: recovery.isReady(in: dir))
         return completionResult
       }
-      try fileManager.removeItem(at: completionURL)
       try fileManager.removeItem(at: dir)
       return .uploaded
     } catch FeedbackUploadError.presignHTTPStatus(let statusCode) {
       let result = Self.presignResult(for: statusCode)
-      persistPermanentFailure(result, in: dir)
+      persistPermanentFailure(result, in: dir, recoveredCopyRejected: recovery.isReady(in: dir))
       return result
     } catch {
       return .retryableFailure
@@ -311,22 +421,50 @@ struct FeedbackUploader {
   }
 
   private func permanentFailure(in dir: URL) -> FeedbackUploadResult? {
+    failureMarker(in: dir)?.result
+  }
+
+  private func failureMarker(in dir: URL) -> FeedbackPermanentFailure? {
     let url = dir.appendingPathComponent(feedbackPermanentFailureFile)
     guard
       let data = try? Data(contentsOf: url),
       let marker = try? JSONDecoder().decode(FeedbackPermanentFailure.self, from: data)
     else { return nil }
-    return marker.result
+    return marker
   }
 
-  private func persistPermanentFailure(_ result: FeedbackUploadResult, in dir: URL) {
+  /// User-confirmed failures only; never expose an in-progress capture.
+  func retainedRecordings() -> [FeedbackRetainedRecording] {
+    let entries = (try? fileManager.contentsOfDirectory(at: outboxRoot,
+      includingPropertiesForKeys: [.isDirectoryKey, .creationDateKey])) ?? []
+    return entries.compactMap { dir in
+      guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+        fileManager.fileExists(atPath: dir.appendingPathComponent(feedbackConfirmedMarker).path),
+        permanentFailure(in: dir) != nil || recovery.hasAttempt(in: dir) || hasMultipartState(in: dir),
+        let files = existingFiles(in: dir) else { return nil }
+      let originals = files.filter { $0.hasSuffix(".mov") }.map { dir.appendingPathComponent($0) }
+      guard !originals.isEmpty else { return nil }
+      return FeedbackRetainedRecording(sessionId: dir.lastPathComponent, originalFiles: originals,
+        createdAt: (try? dir.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast)
+    }.sorted { $0.createdAt < $1.createdAt }
+  }
+
+  private func hasMultipartState(in dir: URL) -> Bool {
+    let entries = (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+    return entries.contains { $0.lastPathComponent.hasPrefix(".multipart-") &&
+      fileManager.fileExists(atPath: $0.appendingPathComponent("state.json").path) }
+  }
+
+  private func persistPermanentFailure(_ result: FeedbackUploadResult, in dir: URL,
+    recoveredCopyRejected: Bool = false) {
     let statusCode: Int
     switch result {
     case .recordingTooLarge: statusCode = 413
     case .rejected(let rejectedStatusCode): statusCode = rejectedStatusCode
     case .uploaded, .retryableFailure: return
     }
-    let marker = FeedbackPermanentFailure(version: 1, statusCode: statusCode)
+    let marker = FeedbackPermanentFailure(version: 1, statusCode: statusCode,
+      recoveredCopyRejected: recoveredCopyRejected)
     let url = dir.appendingPathComponent(feedbackPermanentFailureFile)
     try? JSONEncoder().encode(marker).write(to: url, options: .atomic)
   }
@@ -379,8 +517,11 @@ struct FeedbackUploader {
     if name == feedbackCompletionFile {
       req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     }
-    let (_, response) = try await transport.upload(
-      req, fromFile: dir.appendingPathComponent(name))
+    let file = recovery.copy(for: name, in: dir) ?? dir.appendingPathComponent(name)
+    if let bytes = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+      req.setValue(String(bytes), forHTTPHeaderField: "Content-Length")
+    }
+    let (_, response) = try await transport.upload(req, fromFile: file)
     return Self.objectPutResult(for: response.statusCode)
   }
 
@@ -409,7 +550,7 @@ struct FeedbackUploader {
 
   private func presign(
     sessionId: String, files: [String], manifest: PresignManifest
-  ) async throws -> [String: String] {
+  ) async throws -> PresignResponse {
     var req = URLRequest(url: config.collectorURL.appendingPathComponent("presign"))
     req.httpMethod = "POST"
     req.setValue(config.secret, forHTTPHeaderField: "x-feedback-secret")
@@ -430,7 +571,7 @@ struct FeedbackUploader {
     guard resp.statusCode == 200 else {
       throw FeedbackUploadError.presignHTTPStatus(resp.statusCode)
     }
-    return try JSONDecoder().decode(PresignResponse.self, from: data).urls
+    return try JSONDecoder().decode(PresignResponse.self, from: data)
   }
 
   /// Stores the complete v2 manifest before the first presign. Evidence files

@@ -77,6 +77,30 @@ final class FeedbackReviewWindowPresenter {
     return true
   }
 
+  func presentRecovery(
+    recording: FeedbackRetainedRecording,
+    onRetry: @escaping @MainActor () async -> FeedbackUploadResult,
+    onClose: @escaping () -> Void
+  ) -> Bool {
+    guard window == nil,
+          let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }) else { return false }
+    let window = UIWindow(windowScene: scene)
+    window.windowLevel = .alert + 1
+    window.rootViewController = UIHostingController(rootView: FeedbackRecordingRecoveryView(
+      recording: recording, onRetry: onRetry,
+      onClose: { [weak self] in self?.dismiss(); onClose() }))
+    self.window = window
+    window.isHidden = false
+    for name in [UIScene.didDisconnectNotification, UIApplication.didEnterBackgroundNotification] {
+      teardownObservers.append(NotificationCenter.default.addObserver(
+        forName: name, object: nil, queue: .main) { [weak self] _ in
+          MainActor.assumeIsolated { self?.dismiss() }
+        })
+    }
+    return true
+  }
+
   func dismiss() {
     for observer in teardownObservers { NotificationCenter.default.removeObserver(observer) }
     teardownObservers.removeAll()

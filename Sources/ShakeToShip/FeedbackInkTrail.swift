@@ -116,7 +116,10 @@
       view.isUserInteractionEnabled = false
       let coordinator = context.coordinator
       DispatchQueue.main.async {
-        guard let window = view.window, coordinator.recognizer == nil else { return }
+        guard let attachedWindow = view.window, coordinator.recognizer == nil else { return }
+        // The cursor owns a passthrough overlay window. Observe the host key
+        // window so ordinary app taps can still dismiss its ink.
+        let window = attachedWindow.windowScene?.windows.first(where: \.isKeyWindow) ?? attachedWindow
         let recognizer = UIGestureRecognizer(
           target: coordinator, action: #selector(Coordinator.noop))
         recognizer.cancelsTouchesInView = false

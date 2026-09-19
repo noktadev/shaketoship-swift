@@ -160,6 +160,7 @@ struct ShakeRecorderModifier: ViewModifier {
   @State private var sessionId: String?
   @State private var capTask: Task<Void, Never>?
   @State private var didRetryOutbox = false
+  @State private var dismissedRecoveryIDs: Set<String> = []
   /// Auto-dismissing upload-result toast; nil = hidden. Cancellable dismiss timer.
   @State private var hud: FeedbackHUDState?
   @State private var hudTask: Task<Void, Never>?
@@ -378,6 +379,7 @@ struct ShakeRecorderModifier: ViewModifier {
         if recordingSession != nil {
           Task { await resumeRecording() }
         } else {
+          offerRetainedRecording()
           offerPendingInterrupted()
         }
       }
@@ -891,7 +893,7 @@ struct ShakeRecorderModifier: ViewModifier {
     let confirmed = writeFeedbackConfirmedMarker(in: data.dir)
     await withFeedbackBackgroundTask("afb.upload") {
       let uploader = FeedbackUploader(
-        config: config, transport: URLSessionTransport(),
+        config: config, transport: FeedbackBackgroundUploads.transport,
         fileManager: .default, outboxRoot: root)
       let result = await uploader.upload(sessionId: data.id)
       let state = FeedbackHUDState.status(for: result, confirmed: confirmed)
@@ -902,6 +904,10 @@ struct ShakeRecorderModifier: ViewModifier {
       }
       showHUD(state)
       config.onFunnelEvent?(.uploadResult(outcome: state.outcome))
+      switch result {
+      case .recordingTooLarge, .rejected: offerRetainedRecording()
+      default: break
+      }
     }
     // A second interrupted partial may still be waiting - offer it now that this
     // review has closed, instead of waiting for the next foreground.
@@ -1096,6 +1102,22 @@ struct ShakeRecorderModifier: ViewModifier {
     #endif
   }
 
+  private func offerRetainedRecording() {
+    guard recordingSession == nil, !isRecording, !busy, !reviewPresenter.isPresenting else { return }
+    let uploader = FeedbackUploader(config: config, transport: FeedbackBackgroundUploads.transport,
+      fileManager: .default, outboxRoot: outboxRoot())
+    guard let recording = uploader.retainedRecordings().first(where: { !dismissedRecoveryIDs.contains($0.id) }) else { return }
+    _ = reviewPresenter.presentRecovery(recording: recording,
+      onRetry: {
+        // Each retry owns its uploader. Do not retain the scanner across
+        // repeated callbacks and send that shared value off the main actor.
+        let retryUploader = FeedbackUploader(config: config, transport: FeedbackBackgroundUploads.transport,
+          fileManager: .default, outboxRoot: outboxRoot())
+        return await retryUploader.upload(sessionId: recording.sessionId)
+      },
+      onClose: { dismissedRecoveryIDs.insert(recording.id) })
+  }
+
   private func retryOutboxOnce() {
     guard !didRetryOutbox else { return }
     didRetryOutbox = true
@@ -1103,9 +1125,10 @@ struct ShakeRecorderModifier: ViewModifier {
     Task {
       await withFeedbackBackgroundTask("afb.retry") {
         let uploader = FeedbackUploader(
-          config: config, transport: URLSessionTransport(),
+          config: config, transport: FeedbackBackgroundUploads.transport,
           fileManager: .default, outboxRoot: outboxRoot())
         let result = await uploader.retryOutbox()
+        offerRetainedRecording()
         // Only surface a toast when the launch sweep actually moved something.
         // Queued wins over flushed: "uploaded" must never mask retained files.
         // Same haptics as the stop-flush path: warning for queued, success for

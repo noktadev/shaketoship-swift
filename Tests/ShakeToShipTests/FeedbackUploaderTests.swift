@@ -364,7 +364,7 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.json").path))
   }
 
-  @Test func recordingTooLargeIsPreservedAndNotRetriedAfterRelaunch() async throws {
+  @Test func recordingTooLargeIsPreservedWhileLegacyCapabilityProbePreventsRepeatedUploads() async throws {
     let root = try makeOutbox(sessionId: "too-large")
     let dir = root.appendingPathComponent("too-large")
     try Data("Steps to reproduce".utf8).write(
@@ -395,7 +395,7 @@ import Testing
       try JSONSerialization.jsonObject(with: markerData) as? [String: Any])
     #expect(marker["statusCode"] as? Int == 413)
 
-    let relaunchedTransport = FakeTransport([])
+    let relaunchedTransport = FakeTransport([.init(status: 200, data: presign)])
     let relaunchedUploader = uploader(root, relaunchedTransport)
     let sweep = await relaunchedUploader.retryOutbox()
 
@@ -404,7 +404,7 @@ import Testing
         == OutboxSweepResult(
           flushed: 0, queued: 0, purged: 0, recordingTooLarge: 1,
           rejected: 0))
-    #expect(relaunchedTransport.requests.isEmpty)
+    #expect(relaunchedTransport.requests.count == 1)
     #expect(relaunchedTransport.uploads.isEmpty)
     #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path))
   }
@@ -430,8 +430,9 @@ import Testing
         atPath: dir.appendingPathComponent(".upload-failure.json").path) == false)
     #expect(firstTransport.uploads.map(\.file.lastPathComponent) == ["events.json"])
 
+    let renewed = Data(#"{"urls":{"events.json":"https://r2.example.com/json?token=renewed","recording.mov":"https://r2.example.com/mov?token=renewed","complete.json":"https://r2.example.com/complete?token=renewed"}}"#.utf8)
     let relaunchedTransport = FakeTransport([
-      .init(status: 200, data: presignBody()),
+      .init(status: 200, data: renewed),
       .init(status: 200, data: Data()),
       .init(status: 200, data: Data()),
       .init(status: 200, data: Data()),
@@ -440,6 +441,7 @@ import Testing
 
     #expect(sweep == OutboxSweepResult(flushed: 1, queued: 0, purged: 0))
     #expect(relaunchedTransport.requests.count == 1)
+    #expect(relaunchedTransport.uploads.allSatisfy { $0.request.url?.query == "token=renewed" })
     #expect(relaunchedTransport.uploads.map(\.file.lastPathComponent) == [
       "events.json", "recording.mov", "complete.json",
     ])
@@ -542,7 +544,7 @@ import Testing
     #expect(relaunchedTransport.requests.isEmpty)
   }
 
-  @Test func presignTooLargeRetainsLocalFilesAndStaysTerminal() async throws {
+  @Test func presignTooLargeRetainsOriginalsAfterLegacyCapabilityProbe() async throws {
     let root = try makeOutbox(sessionId: "presign-too-large")
     let dir = root.appendingPathComponent("presign-too-large")
     let transport = FakeTransport([.init(status: 413, data: Data())])
@@ -555,7 +557,7 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("recording.mov").path))
     #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".upload-failure.json").path))
 
-    let relaunchedTransport = FakeTransport([])
+    let relaunchedTransport = FakeTransport([.init(status: 200, data: presignBody())])
     let sweep = await uploader(root, relaunchedTransport).retryOutbox()
 
     #expect(
@@ -563,8 +565,10 @@ import Testing
         == OutboxSweepResult(
           flushed: 0, queued: 0, purged: 0, recordingTooLarge: 1,
           rejected: 0))
-    #expect(relaunchedTransport.requests.isEmpty)
+    #expect(relaunchedTransport.requests.count == 1)
     #expect(relaunchedTransport.uploads.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("events.json").path))
+    #expect(try Data(contentsOf: dir.appendingPathComponent("recording.mov")) == Data("video".utf8))
   }
 
   @Test func retryOutboxSweepsAllSessionDirs() async throws {
