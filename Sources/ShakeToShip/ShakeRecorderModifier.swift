@@ -174,6 +174,11 @@ struct ShakeRecorderModifier: ViewModifier {
   @State private var busy = false
   /// Owns the overlay review window; nil window = no review pending.
   @State private var reviewPresenter = FeedbackReviewWindowPresenter()
+  /// #1391: owns the cursor's own pass-through window. The cursor used to be an
+  /// `.overlay` on the host's root view, which renders BELOW any modal
+  /// presentation - A Life Story's call screen is a `fullScreenCover`, so the
+  /// pill and its stop control were unreachable for the whole call.
+  @State private var cursorPresenter = FeedbackCursorWindowPresenter()
   /// Live Activity handle while recording (iOS 16.2+). Stored as `Any?` to avoid
   /// an availability-annotated stored property; cast at use sites.
   @State private var activityBox: Any?
@@ -186,10 +191,12 @@ struct ShakeRecorderModifier: ViewModifier {
   /// True only while a start request is in flight; keeps the fallback recording
   /// bar from flashing on an island device during that window.
   @State private var liveActivityPending = false
-  /// Active capture time excludes background pauses, preserving the configured
-  /// ReplayKit duration cap across any number of resumed segments.
-  @State private var capturedDuration: TimeInterval = 0
-  @State private var captureSegmentStartedAt: TimeInterval?
+  /// #1393: the one authoritative timestamp of the current session. Assigned
+  /// once in `startRecording` and only mutated by pause/resume - never derived
+  /// from `Date()` at render time, which is what made the cursor's timer
+  /// restart on every body evaluation of the host app. Also owns the active
+  /// capture total, so the ReplayKit duration cap still excludes pauses.
+  @State private var recordingClock: FeedbackRecordingClock?
   /// Monotonic time (systemUptime) of the last prompt dismissal; arms the
   /// 60s cooldown that stops a walking-with-phone nag loop.
   @State private var lastDismissedAt: TimeInterval?
@@ -251,48 +258,58 @@ struct ShakeRecorderModifier: ViewModifier {
   /// hiding it would leave island users with no pen at all.
   private var recordingCursorVisible: Bool { isRecording || recordingPaused }
 
-  /// Start instant the cursor counts from. Derived from accumulated capture
-  /// time, so a pause/resume cycle continues the clock instead of restarting it.
+  /// Start instant the cursor counts from. Read straight off the session clock -
+  /// a stable value that survives every re-render (#1393). Deriving it here
+  /// from `Date()` is the bug this property exists to not have.
   private var cursorStartedAt: Date? {
     guard recordingSession != nil else { return nil }
-    return Date().addingTimeInterval(-capturedDuration)
+    return recordingClock?.origin
+  }
+
+  /// Everything the cursor window has to be rebuilt for. One `onChange` over
+  /// this keeps the window in step with the session without the modifier having
+  /// to touch UIKit from three different places.
+  private struct CursorState: Equatable {
+    let visible: Bool
+    let paused: Bool
+    let startedAt: Date?
+    let stopHintVisible: Bool
+  }
+
+  private var cursorState: CursorState {
+    CursorState(
+      visible: recordingCursorVisible, paused: recordingPaused, startedAt: cursorStartedAt,
+      stopHintVisible: isRecording && shakeStopHintVisible)
   }
 
   func body(content: Content) -> some View {
     content
-      .background(ShakeDetector { Task { await handleShake() } })
-      .overlay(alignment: .topLeading) {
-        if recordingCursorVisible, let startedAt = cursorStartedAt {
-          FeedbackRecordingCursor(
-            microphoneAllowed: config.capabilities.contains(.microphone),
-            paused: recordingPaused,
-            startedAt: startedAt,
-            onStop: { Task { await stopRecording(.user) } },
-            onTogglePause: {
-              Task { recordingPaused ? await resumeRecording() : await pauseRecording() }
-            })
-        }
-      }
+      // The detector sits in the host's own hierarchy, so it is also the honest
+      // answer to "which window and which scene is this recorder attached to".
+      // The cursor's window is created in that scene and the ink is hosted in
+      // that window, instead of either guessing from `connectedScenes`.
+      .background(
+        ShakeDetector(
+          onShake: { Task { await handleShake() } },
+          onWindow: { cursorPresenter.setHostWindow($0) }))
+      // #1391: the cursor is NOT an overlay on the host's root view. A root
+      // overlay renders below every modal presentation, and A Life Story's call
+      // screen is a `fullScreenCover`, so the pill with the timer and the stop
+      // control sat under it for the whole call. It lives in a pass-through
+      // window above every presentation instead - the same remedy the review
+      // composer already needed on dotself (#406). Touches outside the pill are
+      // declined by that window, so the app below keeps all of them.
+      .onChange(of: cursorState, initial: true) { _, _ in syncCursorWindow() }
       // Toast sits top-center; the recording bar is only shown on non-island
       // devices and never at the same moment as a post-upload toast.
       .overlay(alignment: .top) {
         if let hud { FeedbackToast(state: hud).padding(.top, 8) }
       }
-      // #1092: transient "shake again to stop" hint, near the recording
-      // indicator. Non-blocking - no buttons, `allowsHitTesting(false)` so
-      // taps always reach the app below - and auto-dismisses on its own
-      // timer (`FeedbackShakeHintGate`). Sits lower when the recording bar is
-      // showing so it reads as attached to that indicator rather than
-      // overlapping it; on island devices (bar hidden, Live Activity is the
-      // indicator) it sits just under the status bar instead.
-      .overlay(alignment: .top) {
-        if isRecording, shakeStopHintVisible {
-          FeedbackShakeStopHint()
-            .padding(.top, 8)
-            .allowsHitTesting(false)
-            .animation(.easeInOut(duration: 0.2), value: shakeStopHintVisible)
-        }
-      }
+      // #1092's transient "shake again to stop" hint is drawn by the ink layer
+      // now, driven by `cursorState` above. It was a root overlay, so it sat
+      // under a `fullScreenCover` exactly like the pill did (#1391) - and the
+      // call screen is precisely where a first-time user needs to be told that
+      // a shake stops the recording. It stays non-interactive either way.
       .sheet(isPresented: $showConfirm, onDismiss: resolvePrompt) {
         FeedbackPromptSheet(
           // The prompt is only ever reached when this host can record
@@ -392,7 +409,29 @@ struct ShakeRecorderModifier: ViewModifier {
         // Gate flipped off / view torn down: unregister so a stale closure
         // cannot fire into a modifier instance that no longer exists.
         FeedbackManualTrigger.unregister()
+        // The cursor's window is ours, not the host view hierarchy's - nothing
+        // takes it down implicitly, so it has to go here too (#1391).
+        cursorPresenter.dismiss()
       }
+  }
+
+  /// Puts the cursor on screen (or takes it off) to match the session state.
+  /// Called from one `onChange`, so the window is the only thing that knows
+  /// about UIKit here and the rest of the modifier keeps talking in state.
+  private func syncCursorWindow() {
+    guard recordingCursorVisible, let startedAt = cursorStartedAt else {
+      cursorPresenter.dismiss()
+      return
+    }
+    cursorPresenter.show(
+      microphoneAllowed: config.capabilities.contains(.microphone),
+      paused: recordingPaused,
+      startedAt: startedAt,
+      stopHintVisible: isRecording && shakeStopHintVisible,
+      onStop: { Task { await stopRecording(.user) } },
+      onTogglePause: {
+        Task { recordingPaused ? await resumeRecording() : await pauseRecording() }
+      })
   }
 
   private func handleShake() async {
@@ -480,18 +519,21 @@ struct ShakeRecorderModifier: ViewModifier {
       // Timestamp alignment: seed the trail (t=0) only AFTER startCapture's
       // completion fires, as close to first-frame time as practical, so the
       // ReplayKit consent/startup latency is not baked into every event offset.
+      // One instant serves the trail, the cursor and the Live Activity (#1393).
+      let clock = FeedbackRecordingClock(
+        startedAt: Date(), uptime: ProcessInfo.processInfo.systemUptime)
       let seeded = Feedback.shared.startSession(
-        sessionId: id, app: config.app, build: buildNumber(), startedAt: iso8601Now(),
+        sessionId: id, app: config.app, build: buildNumber(),
+        startedAt: iso8601(clock.startedAt),
         userRef: FeedbackUserRef.resolve(configured: config.userRef))
       recordingSession = lifecycle
       sessionId = id
       isRecording = true
-      capturedDuration = 0
-      captureSegmentStartedAt = ProcessInfo.processInfo.systemUptime
+      recordingClock = clock
       config.onFunnelEvent?(.recordingStarted)
       FeedbackHaptics.impact()
       showShakeStopHint()
-      startLiveActivity(startedAt: Date(), screenCount: seeded)
+      startLiveActivity(startedAt: clock.origin, screenCount: seeded)
       // Stop from the Live Activity STOP button (intent runs in-process): route
       // to the normal user-stop path. The handler is async so `signal()` (and
       // thus `StopFeedbackIntent.perform()`) awaits the real stop/finalize
@@ -589,15 +631,19 @@ struct ShakeRecorderModifier: ViewModifier {
       // open in-process.
       clearFeedbackPauseDurability(
         in: outboxRoot().appendingPathComponent(id, isDirectory: true))
-      captureSegmentStartedAt = ProcessInfo.processInfo.systemUptime
+      // The resumed segment shifts the displayed origin forward by exactly the
+      // paused gap, so the timer continues instead of restarting (#1393).
+      recordingClock?.resume(uptime: ProcessInfo.processInfo.systemUptime, wall: Date())
       FeedbackTapCapture.install()
       FeedbackLiveActivityStop.register { await stopRecording(.user) }
       // #669 CHEAP SHOULD-FIX 4: carry the accumulated screen count into the
       // resumed Live Activity instead of resetting the visible counter to 0.
       let screenCount = Feedback.shared.snapshot().events.count(where: { $0.screen != nil })
+      let banked = recordingClock?.bankedDuration ?? 0
       startLiveActivity(
-        startedAt: Date().addingTimeInterval(-capturedDuration), screenCount: screenCount)
-      armCaptureCap(after: max(0, config.maxDuration - capturedDuration))
+        startedAt: recordingClock?.origin ?? Date().addingTimeInterval(-banked),
+        screenCount: screenCount)
+      armCaptureCap(after: max(0, config.maxDuration - banked))
     } catch {
       busy = false
       await stopRecording(.interruption)
@@ -619,9 +665,8 @@ struct ShakeRecorderModifier: ViewModifier {
     hideShakeStopHint()
     busy = true
 
-    let duration = capturedDuration
-    capturedDuration = 0
-    captureSegmentStartedAt = nil
+    let duration = recordingClock?.bankedDuration ?? 0
+    recordingClock = nil
     FeedbackHaptics.impact()
     FeedbackLiveActivityStop.unregister()
     Feedback.shared.setActiveEventHandler(nil)
@@ -715,10 +760,10 @@ struct ShakeRecorderModifier: ViewModifier {
     if reason == .interruption { offerPendingInterrupted() }
   }
 
+  /// Closes the open capture segment on the session clock, banking its active
+  /// seconds. Every pause and every stop goes through here.
   private func accumulateCaptureDuration() {
-    guard let started = captureSegmentStartedAt else { return }
-    capturedDuration += max(0, ProcessInfo.processInfo.systemUptime - started)
-    captureSegmentStartedAt = nil
+    recordingClock?.pause(uptime: ProcessInfo.processInfo.systemUptime)
   }
 
   private func armCaptureCap(after duration: TimeInterval) {
@@ -744,7 +789,7 @@ struct ShakeRecorderModifier: ViewModifier {
     let dir = outboxRoot().appendingPathComponent(id, isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     Feedback.shared.startSession(
-      sessionId: id, app: config.app, build: buildNumber(), startedAt: iso8601Now(),
+      sessionId: id, app: config.app, build: buildNumber(), startedAt: iso8601(),
       userRef: FeedbackUserRef.resolve(configured: config.userRef))
     let data = composerData(id: id, dir: dir, events: Feedback.shared.snapshot().events)
     let presented = reviewPresenter.present(
@@ -807,7 +852,7 @@ struct ShakeRecorderModifier: ViewModifier {
       session_id: data.id,
       app: config.app,
       build: buildNumber(),
-      started_at: trail.started_at.isEmpty ? iso8601Now() : trail.started_at,
+      started_at: trail.started_at.isEmpty ? iso8601() : trail.started_at,
       user_ref: FeedbackUserRef.resolve(configured: config.userRef),
       events: trail.events)
     guard let encoded = try? JSONEncoder().encode(session) else { return }
@@ -1148,8 +1193,8 @@ struct ShakeRecorderModifier: ViewModifier {
     Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
   }
 
-  private func iso8601Now() -> String {
-    ISO8601DateFormatter().string(from: Date())
+  private func iso8601(_ date: Date = Date()) -> String {
+    ISO8601DateFormatter().string(from: date)
   }
 }
 
@@ -1234,34 +1279,64 @@ private struct FeedbackToast: View {
   }
 }
 
-/// Invisible UIKit responder that reports device shakes into SwiftUI.
+/// Invisible UIKit responder that reports device shakes into SwiftUI, and the
+/// host window it is attached to.
+///
+/// The window is reported from here because this controller is the one piece of
+/// the recorder that genuinely lives in the host's view hierarchy: whatever
+/// window it lands in is the window the host app is showing this recorder in,
+/// and therefore the window the ink must be captured in and the scene the pill's
+/// window belongs to (#1391). No app-delegate or scene-delegate involvement.
 private struct ShakeDetector: UIViewControllerRepresentable {
   let onShake: () -> Void
+  let onWindow: (UIWindow?) -> Void
 
   func makeUIViewController(context: Context) -> ShakeViewController {
     let vc = ShakeViewController()
     vc.onShake = onShake
+    vc.onWindow = onWindow
     return vc
   }
 
   func updateUIViewController(_ vc: ShakeViewController, context: Context) {
     vc.onShake = onShake
+    vc.onWindow = onWindow
   }
 }
 
 final class ShakeViewController: UIViewController {
   var onShake: (() -> Void)?
+  var onWindow: ((UIWindow?) -> Void)?
 
   override var canBecomeFirstResponder: Bool { true }
+
+  /// A plain view that reports window changes. `UIViewController` has no
+  /// window-change hook, and a window can change without any appearance
+  /// callback (a host moving its root between scenes).
+  override func loadView() {
+    let reporting = ShakeHostWindowView()
+    reporting.onWindow = { [weak self] window in self?.onWindow?(window) }
+    view = reporting
+  }
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     becomeFirstResponder()
+    onWindow?(view.window)
   }
 
   override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
     if motion == .motionShake { onShake?() }
     super.motionEnded(motion, with: event)
+  }
+}
+
+private final class ShakeHostWindowView: UIView {
+  var onWindow: ((UIWindow?) -> Void)?
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    onWindow?(window)
   }
 }
 

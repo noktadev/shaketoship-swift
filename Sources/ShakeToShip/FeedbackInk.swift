@@ -1,4 +1,6 @@
+import CoreGraphics
 import Foundation
+import Observation
 
 /// Pure fade maths for the annotation trail, kept out of the SwiftUI view so it
 /// can be tested on macOS - the trail itself is `#if os(iOS)` and no test host
@@ -49,5 +51,89 @@ enum FeedbackInkBuffer {
   ) -> [[FeedbackInkPoint]] {
     let cutoff = now - FeedbackInkFade.lifetime
     return strokes.filter { stroke in stroke.contains { $0.t > cutoff } }
+  }
+}
+
+/// The annotation state the two halves of the cursor share.
+///
+/// The pill draws (it owns the drag) and the canvas renders, and after #1391
+/// they live in different places: the pill needs touches above the host's modal
+/// presentations, which takes a window of its own, while the ink is only ever
+/// delivered to a reviewer by the captured video, which means it has to stay
+/// inside the window ReplayKit captures. One shared object is what lets the two
+/// disagree about where they are drawn and still agree about what is drawn.
+///
+/// Also owns "was that touch the pill or the app", which used to sit inline in
+/// the view where no test could reach it.
+@MainActor
+@Observable
+final class FeedbackInkCanvas {
+  private(set) var strokes: [[FeedbackInkPoint]] = []
+  /// When a background tap started retiring the ink; nil while it is live.
+  private(set) var dismissedAt: TimeInterval?
+  /// The pill's hit box in host-window coordinates, published by the pill.
+  /// nil until the pill has laid out once.
+  var cursorBox: CGRect?
+  /// #1092's "shake again to stop" hint. It is non-interactive, so it rides the
+  /// captured layer rather than needing a window.
+  var stopHintVisible = false
+  /// Counts retirements. The pill collapses its expanded row on the same touch
+  /// that retires the ink, and the touch is observed by the layer, not the pill -
+  /// so this is how the pill hears about it.
+  private(set) var retirements = 0
+
+  /// Opens a stroke. A drag is also an explicit "I still want this ink", so a
+  /// dismissal in flight is cancelled.
+  func beginStroke() {
+    dismissedAt = nil
+    strokes.append([])
+  }
+
+  func append(x: Double, y: Double, at t: TimeInterval) {
+    let point = FeedbackInkPoint(x: x, y: y, t: t)
+    if strokes.isEmpty {
+      strokes = [[point]]
+    } else {
+      strokes[strokes.count - 1].append(point)
+    }
+  }
+
+  /// Closes the stroke and drops whatever has fully faded.
+  func endStroke(now: TimeInterval) {
+    strokes = FeedbackInkBuffer.pruned(strokes, now: now)
+  }
+
+  /// A touch-down somewhere on the app retires the ink. Returns false - and
+  /// changes nothing - when the touch landed on the pill (that is the start of a
+  /// drag), when there is no ink, or when a dismissal is already running.
+  @discardableResult
+  func retire(touchAt point: CGPoint, now: TimeInterval) -> Bool {
+    guard !strokes.isEmpty, dismissedAt == nil else { return false }
+    if let cursorBox, cursorBox.contains(point) { return false }
+    dismissedAt = now
+    retirements += 1
+    return true
+  }
+
+  func clear() {
+    strokes = []
+    dismissedAt = nil
+    stopHintVisible = false
+  }
+}
+
+/// Whether a scene-teardown notification belongs to the scene that owns a
+/// presenter's window. `UIScene.didDisconnectNotification` is posted for every
+/// scene, so an unscoped observer would tear the pill's window down when an
+/// unrelated window closes, mid-recording, with nothing to put it back.
+///
+/// Identity only, and outside the UIKit gate so the rule itself is testable.
+/// Takes `ObjectIdentifier` rather than the objects: a `Notification` is
+/// task-isolated under Swift 6 strict concurrency, so the caller has to reduce it
+/// to a Sendable value before hopping to the MainActor.
+enum FeedbackSceneTeardown {
+  static func dismisses(notified: ObjectIdentifier?, owner: ObjectIdentifier?) -> Bool {
+    guard let notified, let owner else { return false }
+    return notified == owner
   }
 }

@@ -57,6 +57,48 @@
     }
   }
 
+  /// Everything the recorder draws that takes no touches: the annotation trail,
+  /// and #1092's "shake again to stop" hint.
+  ///
+  /// This is hosted as a non-interactive subview of the HOST window, not in the
+  /// pill's overlay window, because the video is the only way an annotation ever
+  /// reaches a reviewer (nothing serializes a stroke) and in-app ReplayKit
+  /// capture is reported to see only the app's own window. It is lifted over the
+  /// host's presentations with `zPosition`, which changes what is composited
+  /// without changing what is hit-tested - exactly right for a layer that must
+  /// never take a touch.
+  struct FeedbackInkLayer: View {
+    let ink: FeedbackInkCanvas
+    /// Distance from the top of the window to the first safe pixel, passed in
+    /// rather than read from the environment: this view is hosted as a bare
+    /// window subview (that is what keeps it above the host's presentations), so
+    /// it has no container to inherit a safe area from, and the hint would sit
+    /// behind the clock and battery - the #1184 mistake.
+    let hintTopInset: CGFloat
+
+    var body: some View {
+      ZStack(alignment: .top) {
+        FeedbackInkTrail(strokes: ink.strokes, dismissedAt: ink.dismissedAt)
+        if ink.stopHintVisible {
+          FeedbackShakeStopHint()
+            .padding(.top, hintTopInset + 8)
+            .allowsHitTesting(false)
+            .animation(.easeInOut(duration: 0.2), value: ink.stopHintVisible)
+        }
+        // Observes touch-downs WITHOUT consuming them, so a tap on the app both
+        // retires the ink and still reaches the app. Same mechanism the tap
+        // trail already uses; nothing new intercepts touches here. It watches
+        // `view.window`, which IS the host window now that this layer lives
+        // there - the pill's own window never sees a touch on the app.
+        FeedbackWindowTouchObserver { location in
+          ink.retire(touchAt: location, now: Date().timeIntervalSinceReferenceDate)
+        }
+        .frame(width: 0, height: 0)
+      }
+      .ignoresSafeArea()
+    }
+  }
+
   /// Reports window touch-downs without consuming them.
   ///
   /// `cancelsTouchesInView = false` plus a delegate that declines every touch

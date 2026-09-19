@@ -28,6 +28,13 @@
     let startedAt: Date
     let onStop: () -> Void
     let onTogglePause: () -> Void
+    /// The shared annotation state. The pill writes strokes here; the layer in
+    /// the captured host window renders them (#1391).
+    let ink: FeedbackInkCanvas
+    /// Reports the cursor's hit box, in window coordinates, whenever it moves or
+    /// resizes. The pass-through window claims exactly this region and declines
+    /// everything else (#1391), so it has to be told where the cursor is.
+    var onInteractiveFrame: (CGRect) -> Void = { _ in }
 
     @State private var nib: CGPoint?
     /// Finger-to-nib offset captured at touch-down, so grabbing the label does
@@ -35,8 +42,6 @@
     @State private var grab: CGSize = .zero
     @State private var dragging = false
     @State private var expanded = false
-    @State private var strokes: [[FeedbackInkPoint]] = []
-    @State private var dismissedAt: TimeInterval?
     @State private var measured: CGSize = .zero
     @State private var pulsing = false
     /// Same binding the bar used: `FeedbackMicrophonePreference.isMuted` is
@@ -48,23 +53,9 @@
       GeometryReader { geo in
         let safe = geo.safeAreaInsets
         let point = nib ?? FeedbackCursorGeometry.home(in: geo.size)
+        let box = FeedbackCursorGeometry.hitBox(nib: point, measured: measured)
 
         ZStack(alignment: .topLeading) {
-          FeedbackInkTrail(strokes: strokes, dismissedAt: dismissedAt)
-
-          // Observes touch-downs WITHOUT consuming them, so a tap on the app
-          // both retires the ink and still reaches the app. Same mechanism the
-          // tap trail already uses; nothing new intercepts touches here.
-          FeedbackWindowTouchObserver { location in
-            guard
-              !FeedbackCursorGeometry.hitBox(nib: point, measured: measured).contains(location),
-              !strokes.isEmpty, dismissedAt == nil
-            else { return }
-            dismissedAt = Date().timeIntervalSinceReferenceDate
-            if expanded { withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) { expanded = false } }
-          }
-          .frame(width: 0, height: 0)
-
           label
             .offset(x: point.x, y: point.y)
             // minimumDistance must stay above 0: at 0 the drag swallows the tap
@@ -77,24 +68,39 @@
                       width: value.startLocation.x - point.x,
                       height: value.startLocation.y - point.y)
                     dragging = true
-                    dismissedAt = nil
+                    ink.beginStroke()
                   }
                   let moved = CGPoint(
                     x: value.location.x - grab.width, y: value.location.y - grab.height)
                   let clamped = FeedbackCursorGeometry.clamp(
                     moved, in: geo.size, safeTop: safe.top, safeBottom: safe.bottom)
                   nib = clamped
-                  append(clamped)
+                  // The pill's window and the host window are both full-screen in
+                  // the same scene, so a point is the same point in either.
+                  ink.append(
+                    x: clamped.x, y: clamped.y, at: Date().timeIntervalSinceReferenceDate)
                 }
                 .onEnded { _ in
                   dragging = false
-                  strokes.append([])
-                  strokes = FeedbackInkBuffer.pruned(
-                    strokes, now: Date().timeIntervalSinceReferenceDate)
+                  ink.endStroke(now: Date().timeIntervalSinceReferenceDate)
                 })
             .onTapGesture(count: 2) {
               withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { expanded.toggle() }
             }
+        }
+        // Two consumers need the box, so it is published on first layout and
+        // after every drag and every expansion (#1391): the window hosting this
+        // view claims only this region and passes every other touch to the app
+        // below, and the ink layer uses it to tell a grab of the pill from a tap
+        // on the app.
+        .onAppear { publish(box) }
+        .onChange(of: box) { _, new in publish(new) }
+        // A touch on the app retires the ink AND closes the expanded row, as it
+        // always did. The touch is observed by the ink layer now, so the count
+        // is how the pill hears about it.
+        .onChange(of: ink.retirements) { _, _ in
+          guard expanded else { return }
+          withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) { expanded = false }
         }
       }
       .ignoresSafeArea()
@@ -200,14 +206,12 @@
       .accessibilityLabel(name)
     }
 
-    private func append(_ point: CGPoint) {
-      let ink = FeedbackInkPoint(
-        x: point.x, y: point.y, t: Date().timeIntervalSinceReferenceDate)
-      if strokes.isEmpty {
-        strokes = [[ink]]
-      } else {
-        strokes[strokes.count - 1].append(ink)
-      }
+    /// Tells both consumers where the pill is: the window that decides which
+    /// touches it claims, and the ink layer that decides which touches retire
+    /// the ink.
+    private func publish(_ box: CGRect) {
+      ink.cursorBox = box
+      onInteractiveFrame(box)
     }
   }
 #endif

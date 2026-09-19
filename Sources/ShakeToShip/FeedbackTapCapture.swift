@@ -32,7 +32,10 @@ enum FeedbackTapCapture {
     self.recognizer = nil
   }
 
-  private static func keyWindow() -> UIWindow? {
+  /// The host's key window. Internal because the cursor's ink observer needs the
+  /// same window: the cursor itself now lives in its own pass-through window
+  /// (#1391), which by design never sees a touch on the app.
+  static func keyWindow() -> UIWindow? {
     UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }
       .flatMap(\.windows)
