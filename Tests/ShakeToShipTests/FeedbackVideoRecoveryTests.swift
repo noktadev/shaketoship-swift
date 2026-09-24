@@ -65,7 +65,7 @@ private actor RecoveryCompressor: FeedbackVideoCompressing {
     #expect(transport.requests.count == 2)
     #expect(transport.uploads.isEmpty)
     #expect(try Data(contentsOf: original) == before)
-    #expect(uploader(root, transport, compressor).retainedRecordings().first?.originalFiles == [original])
+    #expect(uploader(root, transport, compressor).retainedRecordings().first?.originalFiles.map { $0.resolvingSymlinksInPath() } == [original.resolvingSymlinksInPath()])
   }
 
   @Test func failedCompletionKeepsOriginalAndRetriesCopyWithoutRecompression() async throws {

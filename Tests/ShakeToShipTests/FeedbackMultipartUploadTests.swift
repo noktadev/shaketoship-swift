@@ -32,7 +32,7 @@ import Testing
     let compressor = MultipartRejectCompressor()
     #expect(await uploader(root, transport, compressor).upload(sessionId: "session") == .retryableFailure)
     #expect(FileManager.default.fileExists(atPath: original.path))
-    #expect(uploader(root, transport, compressor).retainedRecordings().first?.originalFiles == [original])
+    #expect(uploader(root, transport, compressor).retainedRecordings().first?.originalFiles.map { $0.resolvingSymlinksInPath() } == [original.resolvingSymlinksInPath()])
     #expect(await transport.stats().sentinels == 0)
     #expect(await uploader(root, transport, compressor).upload(sessionId: "session") == .retryableFailure)
     #expect(FileManager.default.fileExists(atPath: original.path))
@@ -54,7 +54,7 @@ import Testing
     #expect(await compressor.calls == 1)
     #expect(await transport.stats().starts == 0)
     #expect(FileManager.default.fileExists(atPath: original.path))
-    #expect(uploader(root, transport, compressor).retainedRecordings().first?.originalFiles == [original])
+    #expect(uploader(root, transport, compressor).retainedRecordings().first?.originalFiles.map { $0.resolvingSymlinksInPath() } == [original.resolvingSymlinksInPath()])
   }
 
   @Test func largeJPEGUsesLegacyPUTEvenWhenMultipartIsAdvertised() async throws {
