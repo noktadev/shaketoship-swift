@@ -24,11 +24,14 @@ enum FeedbackRecordingSessionState: Sendable, Equatable {
 
 enum FeedbackRecordingSessionError: Error {
   case invalidTransition
+  case segmentLimitReached
 }
 
 /// Keeps one logical feedback session open while ReplayKit capture is stopped
 /// and restarted across app background/foreground transitions.
 actor FeedbackRecordingSession {
+  // Both hosted ingest and the legacy collector accept twenty segments.
+  static let maximumSegments = 20
   private(set) var state: FeedbackRecordingSessionState = .ready
 
   private let directory: URL
@@ -87,6 +90,11 @@ actor FeedbackRecordingSession {
   }
 
   private func startSegment() async throws {
+    // Remain paused so the host's existing interruption path can finalize and
+    // offer every completed segment without creating an unuploadable report.
+    guard segments.count < Self.maximumSegments else {
+      throw FeedbackRecordingSessionError.segmentLimitReached
+    }
     let name =
       segments.isEmpty
       ? FeedbackAttachmentNaming.recordingFile

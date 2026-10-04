@@ -4,6 +4,29 @@ import Testing
 @testable import ShakeToShip
 
 @Suite struct FeedbackRecordingSessionTests {
+  @Test func segmentCapPreservesTwentySegmentsWithoutStartingAnotherCapture() async throws {
+    let capture = CaptureStub()
+    let session = FeedbackRecordingSession(
+      directory: URL(fileURLWithPath: "/feedback/capped", isDirectory: true),
+      capture: capture)
+
+    try await session.start()
+    for count in 1...20 {
+      try await session.pause()
+      if count < 20 { try await session.resume() }
+    }
+    await #expect(throws: FeedbackRecordingSessionError.self) {
+      try await session.resume()
+    }
+    #expect(await session.state == .paused)
+    #expect(await capture.startCallCount == 20)
+    let segments = try await session.finalize()
+    #expect(segments.count == 20)
+    #expect(segments.first?.file == "recording.mov")
+    #expect(segments.last?.file == "recording-020.mov")
+    #expect(await session.state == .finalized)
+  }
+
   @Test func backgroundPauseAndForegroundResumeKeepOneSessionOpen() async throws {
     let capture = CaptureStub()
     let dir = URL(fileURLWithPath: "/feedback/s1", isDirectory: true)
@@ -83,8 +106,10 @@ private actor CaptureStub: FeedbackCapture {
   private var nextStopIsEmpty = false
   private var nextStopError: FeedbackRecorderError?
   private(set) var stopCallCount = 0
+  private(set) var startCallCount = 0
 
   func start(to url: URL) async throws {
+    startCallCount += 1
     outputURL = url
   }
 
