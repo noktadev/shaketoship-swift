@@ -179,6 +179,25 @@ import AVKit
 import SwiftUI
 import UIKit
 
+/// The same preference as the recording cursor; changing it does not edit the saved clip.
+struct FeedbackMicrophoneRow: View {
+  @Environment(\.shakeToShipTheme) private var theme
+  @Environment(\.locale) private var locale
+  @AppStorage(FeedbackMicrophonePreference.storageKey) private var muted = false
+  var body: some View {
+    Toggle(isOn: Binding(get: { !muted }, set: { muted = !$0 })) {
+      VStack(alignment: .leading, spacing: 4) {
+        Text("Feedback microphone", bundle: .module).feedbackFont(.body).feedbackPrimaryText()
+        Text("Applies to your next recording.", bundle: .module)
+          .feedbackFont(.caption).foregroundStyle(.secondary)
+      }
+    }
+    .environment(\.locale, theme.locale ?? locale)
+    .accessibilityIdentifier("ShakeToShip.review.microphone")
+    .feedbackTheme()
+  }
+}
+
 /// Everything the composer needs to open. One composer, many fillers: it is
 /// the single destination for every entry point - shake then Record or Write,
 /// a bare `FeedbackManualTrigger.signal()` with no recording, and the
@@ -201,6 +220,10 @@ struct FeedbackComposerData: Identifiable {
   let notePrompt: String
   let sendLabel: String
   let showsTrail: Bool
+  let initialMedia: [FeedbackMediaItem]
+  let titlePrompt: String?
+  let initialTitle: String
+  let initialNote: String
 
   init(
     id: String,
@@ -212,6 +235,10 @@ struct FeedbackComposerData: Identifiable {
     notePrompt: String = "What happened?",
     sendLabel: String = "Send",
     showsTrail: Bool = true,
+    initialMedia: [FeedbackMediaItem] = [],
+    titlePrompt: String? = nil,
+    initialTitle: String = "",
+    initialNote: String = "",
     maxAttachmentDuration: TimeInterval = ShakeToShipConfig.defaultMaxDuration
   ) {
     self.id = id
@@ -224,6 +251,10 @@ struct FeedbackComposerData: Identifiable {
     self.notePrompt = notePrompt
     self.sendLabel = sendLabel
     self.showsTrail = showsTrail
+    self.initialMedia = initialMedia
+    self.titlePrompt = titlePrompt
+    self.initialTitle = initialTitle
+    self.initialNote = initialNote
   }
 
   /// Where picked items are staged before Send copies them to their
@@ -247,11 +278,15 @@ struct FeedbackComposer: View {
   let inheritsHostStyle: Bool
   let formHeader: AnyView?
   let formFooter: AnyView?
+  let onDraftChange: ((FeedbackComposerDraftValue) throws -> Void)?
+  let onRecord: ((FeedbackComposerDraftValue) throws -> Void)?
+  @State private var selectedAttachment: FeedbackMediaItem?
   @Environment(\.shakeToShipTheme) private var theme
 
   /// 0 to 3 items, in the order the user built them. Seeded with the recorded
   /// clip when the entry point had one.
   @State private var media: [FeedbackMediaItem]
+  @State private var title = ""
   @State private var note = ""
   /// Running total of the picked bytes, so the byte cap is enforced across a
   /// whole basket rather than per picker session.
@@ -276,7 +311,7 @@ struct FeedbackComposer: View {
   }
 
   private var sendEnabled: Bool {
-    FeedbackComposerRules.sendEnabled(media: media, note: note)
+    FeedbackComposerRules.sendEnabled(media: media, note: composedNote)
   }
 
   init(
@@ -287,7 +322,9 @@ struct FeedbackComposer: View {
     actionReset: UUID? = nil,
     inheritsHostStyle: Bool = false,
     formHeader: AnyView? = nil,
-    formFooter: AnyView? = nil
+    formFooter: AnyView? = nil,
+    onDraftChange: ((FeedbackComposerDraftValue) throws -> Void)? = nil,
+    onRecord: ((FeedbackComposerDraftValue) throws -> Void)? = nil
   ) {
     self.data = data
     self.onSend = onSend
@@ -297,7 +334,14 @@ struct FeedbackComposer: View {
     self.inheritsHostStyle = inheritsHostStyle
     self.formHeader = formHeader
     self.formFooter = formFooter
-    _media = State(initialValue: data.recorded.map { [.recorded($0)] } ?? [])
+    self.onDraftChange = onDraftChange
+    self.onRecord = onRecord
+    _title = State(initialValue: data.initialTitle)
+    _note = State(initialValue: data.initialNote)
+    _media = State(initialValue: (data.recorded.map { [.recorded($0)] } ?? []) + data.initialMedia)
+    _pickedBytes = State(initialValue: data.initialMedia.filter { !$0.isRecorded }.reduce(0) { total, item in
+      total + ((try? item.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+    })
     self.player = data.recorded.map { AVPlayer(url: $0) }
   }
 
@@ -308,6 +352,14 @@ struct FeedbackComposer: View {
     .onChange(of: actionReset) { _, _ in acted = false }
     .onAppear { player?.play() }
     .onDisappear { player?.pause() }
+    .onChange(of: title) { _, _ in saveDraft() }
+    .onChange(of: note) { _, _ in saveDraft() }
+    .onChange(of: media) { _, _ in saveDraft() }
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in saveDraft() }
+    .fullScreenCover(item: $selectedAttachment) { item in
+      FeedbackAttachmentViewer(items: media, initialSelection: item.url,
+        onRemove: onDraftChange == nil ? nil : { remove($0) })
+    }
     .sheet(isPresented: $showPicker) {
       FeedbackPhotoPicker(
         selectionLimit: FeedbackComposerRules.remainingSelectionLimit(mediaCount: media.count),
@@ -318,9 +370,41 @@ struct FeedbackComposer: View {
     }
   }
 
+  private var draftValue: FeedbackComposerDraftValue {
+    FeedbackComposerDraftValue(title: title, note: note, media: media)
+  }
+  private var canRecord: Bool {
+    onRecord != nil && data.capabilities.contains(.screenRecording) && FeedbackManualTrigger.isRecordingAvailable
+  }
+  private func saveDraft() {
+    guard !acted else { return }
+    do { try onDraftChange?(draftValue) }
+    catch { rejectionMessage = "Could not save your report. Please try again." }
+  }
+  private func recordDraft() {
+    guard !acted, canRecord, media.count < FeedbackAttachmentBounds.maxItems else { return }
+    acted = true
+    do { try onRecord?(draftValue) }
+    catch { acted = false; rejectionMessage = "Could not save your report. Please try again." }
+  }
+
+  private var composedNote: String {
+    [title.trimmingCharacters(in: .whitespacesAndNewlines), note]
+      .filter { !$0.isEmpty }.joined(separator: "\n\n")
+  }
+
   private var nativeRows: some View {
     Form {
       formHeader
+      if canRecord {
+        Section {
+          FeedbackWalkthroughButton(action: recordDraft)
+            .disabled(acted || media.count >= FeedbackAttachmentBounds.maxItems)
+        }.feedbackRow()
+      }
+      if let titlePrompt = data.titlePrompt, FeedbackComposerRules.showsNoteField(capabilities: data.capabilities) {
+        Section("Title") { TextField(titlePrompt, text: $title).feedbackPrimaryText() }.feedbackRow()
+      }
       if FeedbackComposerRules.showsNoteField(capabilities: data.capabilities) {
         Section {
           noteInput
@@ -331,21 +415,27 @@ struct FeedbackComposer: View {
         }.feedbackRow()
       }
       if !media.isEmpty || FeedbackComposerRules.showsAttach(
-        capabilities: data.capabilities, mediaCount: media.count)
+        capabilities: data.capabilities, mediaCount: media.count) || canRecord
       {
         Section("Attachments") {
           ScrollView(.horizontal) {
             HStack(alignment: .top, spacing: 12) {
               ForEach(media) { item in
-                VStack(spacing: 8) {
+                Button { selectedAttachment = item } label: {
                   FeedbackMediaThumbnail(item: item).frame(width: 96, height: 108)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
-                  if FeedbackComposerRules.showsRemove(for: item) {
-                    Button("Remove", role: .destructive) { remove(item) }
-                      .buttonStyle(.borderless)
-                      .accessibilityLabel("Remove attachment")
+                }.buttonStyle(.borderless)
+                  .accessibilityLabel(item.kind == .video ? "Video attachment" : "Image attachment")
+                  .accessibilityIdentifier("ShakeToShip.attachment.thumbnail.\(item.kind.rawValue)")
+                  .overlay(alignment: .topTrailing) {
+                    if onDraftChange != nil || FeedbackComposerRules.showsRemove(for: item) {
+                      Button { remove(item) } label: {
+                        Image(systemName: "xmark.circle.fill")
+                          .symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.7))
+                          .frame(width: 44, height: 44)
+                      }.buttonStyle(.borderless).accessibilityLabel("Remove attachment")
+                    }
                   }
-                }
               }
               if FeedbackComposerRules.showsAttach(
                 capabilities: data.capabilities, mediaCount: media.count)
@@ -356,9 +446,23 @@ struct FeedbackComposer: View {
                     .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                 }.buttonStyle(.borderless).accessibilityLabel("Attach a photo or video")
               }
+              if canRecord {
+                Button(action: recordDraft) {
+                  VStack(spacing: 8) {
+                    Image(systemName: "record.circle").font(.title2)
+                    Text("Record").font(.body)
+                  }.frame(width: 96, height: 108)
+                    .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                }.buttonStyle(.borderless)
+                  .disabled(acted || media.count >= FeedbackAttachmentBounds.maxItems)
+                  .accessibilityIdentifier("ShakeToShip.report.recordTile")
+              }
             }
           }.scrollIndicators(.hidden)
         }.feedbackRow()
+      }
+      if data.recorded != nil {
+        Section { FeedbackMicrophoneRow() }.feedbackRow()
       }
       formFooter
       if let rejectionMessage { Section { Text(rejectionMessage) }.feedbackRow() }
@@ -368,10 +472,10 @@ struct FeedbackComposer: View {
       }.feedbackRow()
     }
     .feedbackListStyle()
-    .interactiveDismissDisabled(!note.isEmpty || !media.isEmpty)
+    .interactiveDismissDisabled(!title.isEmpty || !note.isEmpty || !media.isEmpty)
     .toolbar {
       ToolbarItem(placement: .confirmationAction) {
-        Button("Send") { act { onSend(FeedbackComposerResult(media: media, note: note)) } }
+        Button("Send") { act { onSend(FeedbackComposerResult(media: media, note: composedNote)) } }
           .accessibilityLabel(data.sendLabel)
           .disabled(acted || !sendEnabled)
       }
@@ -382,6 +486,7 @@ struct FeedbackComposer: View {
     VStack(spacing: 0) {
       preview
       mediaStrip
+      if data.recorded != nil { FeedbackMicrophoneRow().padding(.horizontal, 16) }
       if let rejectionMessage {
         Text(rejectionMessage)
           .feedbackFont(.caption, inherit: inheritsHostStyle)
@@ -599,7 +704,7 @@ struct FeedbackComposer: View {
 
   private var sendButton: some View {
     Button {
-      act { onSend(FeedbackComposerResult(media: media, note: note)) }
+      act { onSend(FeedbackComposerResult(media: media, note: composedNote)) }
     } label: {
       Label(data.sendLabel, systemImage: "arrow.up.circle.fill")
         .frame(maxWidth: .infinity)
@@ -612,7 +717,14 @@ struct FeedbackComposer: View {
   /// stays up until its binding is cleared.
   private func absorb(_ outcome: FeedbackPhotoPickerOutcome) {
     showPicker = false
-    media.append(contentsOf: outcome.accepted)
+    let updated = media + outcome.accepted
+    do {
+      try onDraftChange?(FeedbackComposerDraftValue(title: title, note: note, media: updated))
+    } catch {
+      rejectionMessage = "Could not save your attachments. Please try again."
+      return
+    }
+    media = updated
     pickedBytes += outcome.acceptedBytes
     rejectionMessage = outcome.rejection?.message
   }
@@ -623,14 +735,23 @@ struct FeedbackComposer: View {
   /// the file on disk and upload it anyway, which is worse than not offering
   /// the affordance. Discard drops the whole report, which is how a user
   /// unsends a recording today.
-  private func remove(_ item: FeedbackMediaItem) {
-    guard FeedbackComposerRules.showsRemove(for: item) else { return }
-    media.removeAll { $0.id == item.id }
+  @discardableResult
+  private func remove(_ item: FeedbackMediaItem) -> Bool {
+    guard onDraftChange != nil || FeedbackComposerRules.showsRemove(for: item) else { return false }
+    let updated = media.filter { $0.id != item.id }
+    do {
+      try onDraftChange?(FeedbackComposerDraftValue(title: title, note: note, media: updated))
+    } catch {
+      rejectionMessage = "Could not remove this attachment. Please try again."
+      return false
+    }
+    media = updated
     rejectionMessage = nil
     // The staged copy is inside the session dir, so Discard would take it
     // anyway - but a removed item must stop counting against the byte cap.
-    pickedBytes = max(0, pickedBytes - (fileSize(item.url) ?? 0))
+    if !item.isRecorded { pickedBytes = max(0, pickedBytes - (fileSize(item.url) ?? 0)) }
     try? FileManager.default.removeItem(at: item.url)
+    return true
   }
 
   private func fileSize(_ url: URL) -> Int? {
@@ -649,7 +770,7 @@ struct FeedbackComposer: View {
 /// A media tile. Images render themselves; a video renders a poster frame when
 /// one can be made cheaply, and its film glyph otherwise. Never blocks the main
 /// thread on a decode: this sheet appears the instant a recording stops.
-private struct FeedbackMediaThumbnail: View {
+struct FeedbackMediaThumbnail: View {
   let item: FeedbackMediaItem
 
   @State private var image: UIImage?
@@ -664,6 +785,12 @@ private struct FeedbackMediaThumbnail: View {
       } else {
         Image(systemName: item.kind == .video ? "film" : "photo")
           .foregroundStyle(.white.opacity(0.7))
+      }
+    }
+    .overlay {
+      if item.kind == .video {
+        Image(systemName: "play.circle.fill").font(.title).foregroundStyle(.white)
+          .shadow(radius: 3).accessibilityHidden(true)
       }
     }
     .task(id: item.id) { image = await FeedbackMediaThumbnailLoader.load(item) }

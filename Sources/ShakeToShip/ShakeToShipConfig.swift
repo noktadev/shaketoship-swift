@@ -87,11 +87,22 @@ public struct ShakeToShipConfig: Sendable {
   /// TestFlight tester seeded opt-in ON would have no way to stop
   /// shake-to-record.
   public let onOptOut: (@MainActor @Sendable () -> Void)?
+  /// Return true after routing a gated walkthrough request to the host's consent UI.
+  /// After consent and mounting, resume with `FeedbackManualTrigger.signalRecording()`.
+  public let onRecordingRequestedWhileGated: (@MainActor @Sendable () -> Bool)?
   /// Legacy capture metadata, capped at 128 characters. With the hub enabled,
   /// this is an unverified display label. It never proves or recovers identity.
   /// Call `try await ShakeToShip.resetIdentity()` when the host account changes.
   public let userRef: String?
   public let hub: HubOptions
+  /// Keep false when the host exposes the hub only through its own navigation.
+  public let hubOnShake: Bool
+  /// Upgrade compatibility for a host that previously shipped the recorder without the hub.
+  /// Unbound outbox entries keep the legacy upload path and never acquire hub ownership.
+  /// Existing reporter bindings remain mandatory and are always validated when present.
+  public let allowsLegacyCaptures: Bool
+  /// Return true while sensitive host content must not enter automatic report screenshots.
+  public let screenshotExclusion: @MainActor @Sendable () -> Bool
   public let contact: Contact?
   public let traits: [String: String]?
   public let accent: Color
@@ -109,8 +120,12 @@ public struct ShakeToShipConfig: Sendable {
     maxDuration: TimeInterval = ShakeToShipConfig.defaultMaxDuration,
     onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)? = nil,
     onOptOut: (@MainActor @Sendable () -> Void)? = nil,
+    onRecordingRequestedWhileGated: (@MainActor @Sendable () -> Bool)? = nil,
     userRef: String? = nil,
     hub: HubOptions = [],
+    hubOnShake: Bool = true,
+    allowsLegacyCaptures: Bool = false,
+    screenshotExclusion: @escaping @MainActor @Sendable () -> Bool = { false },
     contact: Contact? = nil,
     traits: [String: String]? = nil,
     accent: Color = .blue,
@@ -126,8 +141,12 @@ public struct ShakeToShipConfig: Sendable {
     self.maxDuration = maxDuration
     self.onFunnelEvent = onFunnelEvent
     self.onOptOut = onOptOut
+    self.onRecordingRequestedWhileGated = onRecordingRequestedWhileGated
     self.userRef = userRef
     self.hub = hub
+    self.hubOnShake = hubOnShake
+    self.allowsLegacyCaptures = allowsLegacyCaptures
+    self.screenshotExclusion = screenshotExclusion
     self.contact = contact
     self.traits = traits
     self.accent = accent
@@ -152,7 +171,8 @@ extension ShakeToShipConfig {
   /// is the exact silent-drop bug this helper exists to prevent.
   public func with(
     onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)?,
-    onOptOut: (@MainActor @Sendable () -> Void)?
+    onOptOut: (@MainActor @Sendable () -> Void)?,
+    onRecordingRequestedWhileGated: (@MainActor @Sendable () -> Bool)? = nil
   ) -> ShakeToShipConfig {
     ShakeToShipConfig(
       app: app,
@@ -164,7 +184,9 @@ extension ShakeToShipConfig {
       maxDuration: maxDuration,
       onFunnelEvent: onFunnelEvent,
       onOptOut: onOptOut,
-      userRef: userRef, hub: hub, contact: contact, traits: traits,
+      onRecordingRequestedWhileGated: onRecordingRequestedWhileGated ?? self.onRecordingRequestedWhileGated,
+      userRef: userRef, hub: hub, hubOnShake: hubOnShake,
+      allowsLegacyCaptures: allowsLegacyCaptures, screenshotExclusion: screenshotExclusion, contact: contact, traits: traits,
       accent: accent, font: font, supportURL: supportURL
     )
   }
@@ -195,6 +217,7 @@ extension ShakeToShipConfig {
     let secret: String
     let capabilities: Capabilities
     let hub: HubOptions
+    let allowsLegacyCaptures: Bool
     let userRef: String?
     let contact: Contact?
     let traits: [String: String]?
@@ -204,7 +227,7 @@ extension ShakeToShipConfig {
   }
   var hubConfigurationID: HubConfigurationID {
     HubConfigurationID(app: app, origin: collectorURL, secret: secret, capabilities: capabilities,
-      hub: hub, userRef: userRef, contact: contact, traits: traits, accent: accent,
+      hub: hub, allowsLegacyCaptures: allowsLegacyCaptures, userRef: userRef, contact: contact, traits: traits, accent: accent,
       font: font, supportURL: supportURL)
   }
 }

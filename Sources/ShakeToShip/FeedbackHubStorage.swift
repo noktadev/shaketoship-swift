@@ -66,6 +66,14 @@ struct FeedbackHubStorage: Sendable {
     }
     let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("shaketoship-hub", isDirectory: true)
+    // Marked unsent drafts are private too, even though media lives in the outbox.
+    let outbox = FeedbackReportDraftStore.defaultOutboxRoot
+    for directory in (try? FileManager.default.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil)) ?? [] {
+      guard UUID(uuidString: directory.lastPathComponent) != nil,
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent(FeedbackReportDraftStore.marker).path),
+        (try? FeedbackCaptureBinding.read(in: directory)) != nil else { continue }
+      try FileManager.default.removeItem(at: directory)
+    }
     if FileManager.default.fileExists(atPath: root.path) {
       try FileManager.default.removeItem(at: root)
     }
@@ -94,6 +102,13 @@ struct FeedbackHubStorage: Sendable {
     return try JSONDecoder().decode(type, from: Data(contentsOf: url))
   }
   func clearPrivateData() throws {
+    let outbox = FeedbackReportDraftStore.defaultOutboxRoot
+    for directory in (try? FileManager.default.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil)) ?? [] {
+      guard UUID(uuidString: directory.lastPathComponent) != nil,
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent(FeedbackReportDraftStore.marker).path),
+        let binding = try? FeedbackCaptureBinding.read(in: directory), binding.scope == scope else { continue }
+      try FileManager.default.removeItem(at: directory)
+    }
     if FileManager.default.fileExists(atPath: root.path) {
       try FileManager.default.removeItem(at: root)
     }

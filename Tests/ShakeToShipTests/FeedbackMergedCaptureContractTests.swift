@@ -93,7 +93,7 @@ struct FeedbackMergedCaptureContractTests {
     #expect(try await client.attachableReports().isEmpty)
   }
 
-  @Test(arguments: ["missing", "foreign-scope", "old-generation", "inactive", "disabled"])
+  @Test(arguments: ["missing", "foreign-scope", "old-generation", "inactive", "disabled", "legacy-enabled"])
   func invalidBindingOrClosedGateNeverStartsOrReassignsCapture(_ condition: String) async throws {
     let transport = HubTestTransport()
     let (client, root, _) = try FeedbackHubClientTests().fixture(transport: transport)
@@ -111,6 +111,11 @@ struct FeedbackMergedCaptureContractTests {
     }
     var config = await client.config
     if condition == "inactive" { await client.setActive(false) }
+    if condition == "legacy-enabled" {
+      config = ShakeToShipConfig(app: config.app, collectorURL: config.collectorURL,
+        secret: config.secret, hub: config.hub, allowsLegacyCaptures: true)
+      await client.setActive(false)
+    }
     if condition == "disabled" {
       // The bound capture must not fall back to the legacy transport when the hub is removed.
       config = ShakeToShipConfig(app: config.app, collectorURL: config.collectorURL, secret: config.secret)

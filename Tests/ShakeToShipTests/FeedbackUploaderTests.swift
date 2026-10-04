@@ -52,6 +52,35 @@ import Testing
 
   // MARK: - Tests
 
+  @Test func hubUpgradeRetriesLegacyCaptureWithoutReporterOwnership() async throws {
+    let root = try makeOutbox(sessionId: "legacy")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let config = ShakeToShipConfig(app: "dotself",
+      collectorURL: URL(string: "https://collector.example.com")!, secret: "shh",
+      hub: [.ideas, .inbox], allowsLegacyCaptures: true)
+    #expect(config.with(onFunnelEvent: nil, onOptOut: nil).allowsLegacyCaptures)
+    let transport = FakeTransport([
+      .init(status: 200, data: presignBody()),
+      .init(status: 503, data: Data()),
+      .init(status: 200, data: presignBody()),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+      .init(status: 200, data: Data()),
+    ])
+    let uploader = FeedbackUploader(config: config, transport: transport,
+      fileManager: .default, outboxRoot: root)
+    #expect(await uploader.upload(sessionId: "legacy") == .retryableFailure)
+    #expect(await uploader.upload(sessionId: "legacy") == .uploaded)
+    let presigns = transport.requests.filter { $0.url?.path == "/presign" }
+    #expect(presigns.count == 2)
+    for request in presigns {
+      #expect(request.value(forHTTPHeaderField: "x-reporter-token") == nil)
+      let body = try #require(try JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
+      #expect(body["purpose"] == nil)
+    }
+    #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("legacy").path))
+  }
+
   @Test func presignRequestHasCorrectShape() async throws {
     let root = try makeOutbox(sessionId: "s1")
     let transport = FakeTransport([

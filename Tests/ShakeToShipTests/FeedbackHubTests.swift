@@ -8,9 +8,10 @@ struct FeedbackHubTests {
     let disabled = ShakeToShipConfig(
       app: "test", collectorURL: URL(string: "https://test.invalid")!, secret: "secret")
     #expect(disabled.hub.isEmpty)
+    #expect(disabled.hubOnShake)
     #expect(!FeedbackGate.shouldAttachHub(config: disabled, recorderActive: true))
     let enabled = ShakeToShipConfig(
-      app: "test", collectorURL: disabled.collectorURL, secret: "secret", hub: [.ideas])
+      app: "test", collectorURL: disabled.collectorURL, secret: "secret", hub: [.ideas], hubOnShake: false)
     #expect(!FeedbackGate.shouldAttachHub(config: enabled, recorderActive: false))
     #expect(FeedbackGate.shouldAttachHub(config: enabled, recorderActive: true))
     let empty = ShakeToShipConfig(
@@ -18,6 +19,7 @@ struct FeedbackHubTests {
       hub: [.ideas])
     #expect(!FeedbackGate.shouldAttachHub(config: empty, recorderActive: true))
     #expect(enabled.with(onFunnelEvent: nil, onOptOut: nil).hub == [.ideas])
+    #expect(!enabled.with(onFunnelEvent: nil, onOptOut: nil).hubOnShake)
   }
 
   @Test func queueSurvivesRestartAndKeepsSequenceAfterAcknowledgement() throws {

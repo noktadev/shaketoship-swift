@@ -3,28 +3,18 @@ import Testing
 
 @testable import ShakeToShip
 
-/// The Settings entry and the recording bar are ONE control.
-///
-/// The bar is unreachable on a Dynamic Island iPhone - there the Live Activity
-/// is the sole in-app indicator, so the bar and its mute button are never on
-/// screen while recording. A Settings row is the reachable mute. Two rows
-/// writing two stores would be worse than none: the user would mute in
-/// Settings and still be recorded.
-///
-/// Both surfaces are `@AppStorage(FeedbackMicrophonePreference.storageKey)`,
-/// so the proof here is at the storage seam: whatever either writes, the
-/// recorder's own read observes. That the VIEWS actually bind to this key -
-/// which no unit test can see - is guarded by the source scan in
-/// `scripts/microphone-mute-one-source.test.ts`.
+/// Review, recording cursor, and host settings all share the SDK preference.
+/// Storage tests prove that all writes affect the recorder. The source guard
+/// in `scripts/microphone-mute-one-source.test.ts` checks the view bindings.
 @Suite struct FeedbackMicrophoneSettingsParityTests {
   private func freshDefaults() -> (UserDefaults, String) {
     let suite = "shaketoship.tests.\(UUID().uuidString)"
     return (UserDefaults(suiteName: suite)!, suite)
   }
 
-  /// A Settings row writing through `@AppStorage` is a plain `set(_:forKey:)`
+  /// A review row writing through `@AppStorage` is a plain `set(_:forKey:)`
   /// on the same key. The recorder must see it.
-  @Test func aSettingsWriteIsSeenByTheRecorder() {
+  @Test func aReviewWriteIsSeenByTheRecorder() {
     let (defaults, suite) = freshDefaults()
     defer { defaults.removePersistentDomain(forName: suite) }
 
@@ -35,9 +25,9 @@ import Testing
     #expect(FeedbackMicrophonePreference(defaults: defaults).isMuted == false)
   }
 
-  /// And the other direction: the bar's write is what a Settings row reads
+  /// And the other direction: the cursor's write is what the review row reads
   /// back, so the row shows the state the bar left rather than a stale copy.
-  @Test func aBarWriteIsSeenBySettings() {
+  @Test func aCursorWriteIsSeenByReview() {
     let (defaults, suite) = freshDefaults()
     defer { defaults.removePersistentDomain(forName: suite) }
 

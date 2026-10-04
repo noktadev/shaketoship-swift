@@ -7,6 +7,7 @@ final class FeedbackHubModel {
   let client: FeedbackHubClient
   let config: ShakeToShipConfig
   let identityGeneration: UUID
+  let draftStore: FeedbackReportDraftStore
   var active = true
   var revision = UUID()
   var visibilityRevision = UUID()
@@ -25,6 +26,8 @@ final class FeedbackHubModel {
   var filter = "top"
   var cursor: String?
   var selectedTab = 0
+  var reportScreenshot: Data?
+  func endReportPresentation() { reportScreenshot = nil }
   var selectedIdea: FeedbackIdea?
   var detailLoading = false
   private var detailRequest = UUID()
@@ -36,17 +39,22 @@ final class FeedbackHubModel {
   init(client: FeedbackHubClient, config: ShakeToShipConfig, defaults: UserDefaults = .standard) {
     self.client = client
     self.identityGeneration = client.localGeneration
+    self.draftStore = FeedbackReportDraftStore(storage: client.storage, generation: client.localGeneration)
     self.config = config
     self.defaults = defaults
     emailOfferKey = "shaketoship.email-offer.v3"
   }
   func invalidate() {
+    if FeedbackManualTrigger.reportRecording?.store.generation == identityGeneration {
+      FeedbackManualTrigger.reportRecording = nil
+    }
     loading = false
     promptLoading = false
     listRequest = UUID()
     inboxLoading = false
     inboxError = nil
     revision = UUID()
+    reportScreenshot = nil
     ideas = []
     inbox = []
     prompt = nil
@@ -332,12 +340,37 @@ public enum ShakeToShip {
     get { FeedbackHubRuntime.shared.model }
     set { FeedbackHubRuntime.shared.model = newValue }
   }
+  #if canImport(UIKit)
+  static weak var hostWindow: UIWindow?
+  #endif
   static var present: ((Int) -> Void)?
   private static var activation = UUID()
+  /// Cached unread messages from the last inbox fetch. Never performs network I/O.
+  /// Returns zero before a fetch, after identity reset, and while the hub is inactive.
+  public static var unreadInboxCount: Int {
+    get async { cachedUnreadInboxCount }
+  }
+  /// Observable from SwiftUI bodies, including acknowledgement and identity changes.
+  public static var hasUnreadInboxReplies: Bool { cachedUnreadInboxCount > 0 }
+  private static var cachedUnreadInboxCount: Int {
+    guard let model, model.active, model.config.hub.contains(.inbox) else { return 0 }
+    return model.inbox.count
+  }
   public static func presentHub() {
-    guard model?.active == true else { return }
+    guard let model, model.active else { return }
+    #if canImport(UIKit)
+    model.reportScreenshot = FeedbackReportScreenshot.capture(config: model.config)
+    #endif
     present?(0)
-    if let model { Task { await model.start() } }
+    Task { await model.start() }
+  }
+  /// Captures the host before any SDK sheet opens. The user reviews it before sending.
+  public static func presentReport() {
+    guard let model, model.active else { return }
+    #if canImport(UIKit)
+    model.reportScreenshot = FeedbackReportScreenshot.capture(config: model.config)
+    #endif
+    present?(3)
   }
   public static func resetIdentity() async throws {
     guard let model else {
@@ -384,7 +417,7 @@ public enum ShakeToShip {
   static func canAccessCapture(in directory: URL, allowLegacy: Bool = true) async -> Bool {
     do {
       guard let binding = try FeedbackCaptureBinding.read(in: directory) else {
-        return allowLegacy && model?.active != true
+        return allowLegacy && (model?.active != true || model?.config.allowsLegacyCaptures == true)
       }
       guard let model, model.active else { return false }
       let expected = model.revision

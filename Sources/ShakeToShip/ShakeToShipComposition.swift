@@ -55,10 +55,21 @@ public enum ShakeToShipRoute: Hashable {
   }
   extension View {
     /// Install once inside the host's NavigationStack, outside lazy containers.
-    public func shakeToShipDestinations() -> some View {
+    /// The host supplies the optional Ideas action and owns its sheet presentation.
+    public func shakeToShipDestinations(
+      suggestLabel: String = "Suggest an idea", onSuggest: (() -> Void)? = nil
+    ) -> some View {
       navigationDestination(for: ShakeToShipRoute.self) { route in
         switch route {
-        case .ideas: ShakeToShipIdeasList().navigationTitle("Ideas")
+        case .ideas:
+          ShakeToShipIdeasList().navigationTitle("Ideas")
+            .toolbar {
+              if let onSuggest {
+                ToolbarItem(placement: .primaryAction) {
+                  Button(suggestLabel, systemImage: "plus", action: onSuggest)
+                }
+              }
+            }
         case .idea(let id): ShakeToShipIdeaDetail(id: id).navigationTitle("Idea")
         case .inbox: ShakeToShipInboxList().navigationTitle("Inbox")
         }
@@ -77,7 +88,9 @@ public enum ShakeToShipRoute: Hashable {
           if alwaysVisible {
             FeedbackEmailEnrollmentCard(model: model, onClose: close)
           } else {
-            Button("Get a reply", systemImage: "envelope") { presented = true }
+            Button { presented = true } label: {
+              FeedbackEntryLabel(title: "Get a reply", systemImage: "envelope")
+            }.buttonStyle(.plain)
           }
         }
         .sheet(isPresented: $presented, onDismiss: close) {
@@ -165,7 +178,7 @@ public enum ShakeToShipRoute: Hashable {
         FeedbackRecordingConsentCard(showsWrite: showsWrite, onRecord: onRecord,
           onWrite: onWrite, onDismiss: onDismiss)
       } else {
-        FeedbackHubSheet(onRecord: onRecord, onWrite: showsWrite ? onWrite : nil)
+        FeedbackHubSheet()
       }
     }
   }
@@ -189,12 +202,12 @@ public enum ShakeToShipRoute: Hashable {
 
   struct FeedbackHubSheet: View {
     var initialRoute: ShakeToShipRoute? = nil
-    var onRecord: (() -> Void)? = nil
-    var onWrite: (() -> Void)? = nil
+    var initialReport = false
+    var screenshot: Data? = nil
     var body: some View {
       FeedbackHubSurface { model in
-        FeedbackHubEntryCard(model: model, path: initialRoute.map { [$0] } ?? [],
-          onRecord: onRecord, onWrite: onWrite)
+        if initialReport { FeedbackHubReport(model: model, screenshot: screenshot) }
+        else { FeedbackHubEntryCard(model: model, path: initialRoute.map { [$0] } ?? []) }
       }
     }
   }
@@ -202,12 +215,9 @@ public enum ShakeToShipRoute: Hashable {
   struct FeedbackHubEntryCard: View {
     @Bindable var model: FeedbackHubModel
     @State var path: [ShakeToShipRoute] = []
-    var onRecord: (() -> Void)? = nil
-    var onWrite: (() -> Void)? = nil
-    @State private var report = false
+    @State private var report: FeedbackReportPresentation?
     @State private var suggest = false
     @State private var email = false
-    @State private var recordingConsent = false
     @State private var entryHeights: [String: CGFloat] = [:]
     @Environment(\.shakeToShipTheme) private var theme
     private var entryTitles: [String] {
@@ -220,10 +230,11 @@ public enum ShakeToShipRoute: Hashable {
         ScrollView {
           FeedbackCard(symbol: "bubble.left", title: "Any feedback to share?",
             message: "Report a problem, share an idea, or see what's new.") {
+            if model.config.capabilities.contains(.screenRecording), FeedbackManualTrigger.isRecordingAvailable { FeedbackWalkthroughButton() }
             List {
               Section {
                 Button {
-                  if onRecord != nil { recordingConsent = true } else { report = true }
+                  report = FeedbackReportPresentation(screenshot: FeedbackReportScreenshot.captureForReport(model: model))
                 } label: { entry("Report a bug", "ladybug", showsChevron: true) }
                 .buttonStyle(.plain)
                 .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
@@ -247,6 +258,7 @@ public enum ShakeToShipRoute: Hashable {
             .frame(height: entryTitles.reduce(0) { $0 + (entryHeights[$1] ?? 48) })
             // The native section supplies its own inset outside the card's content padding.
             .padding(.horizontal, -20)
+            FeedbackRecordingDeviceHint()
             if !model.config.hub.contains(.inbox) {
               Button("Email updates", systemImage: "envelope") { email = true }
             }
@@ -262,22 +274,19 @@ public enum ShakeToShipRoute: Hashable {
             }
           }.navigationBarTitleDisplayMode(.inline).toolbar(.visible, for: .navigationBar)
         }
-        .sheet(isPresented: $report) { FeedbackHubReport(model: model) }
+        .sheet(item: $report) { report in FeedbackHubReport(model: model, screenshot: report.screenshot) }
         .sheet(isPresented: $suggest) { FeedbackSuggestView(model: model) }
         .sheet(isPresented: $email) { FeedbackEmailSheet(model: model) }
-        .sheet(isPresented: $recordingConsent) {
-          FeedbackRecordingConsentCard(showsWrite: onWrite != nil,
-            onRecord: { onRecord?() }, onWrite: { onWrite?() },
-            onDismiss: { recordingConsent = false })
-        }
-      }.feedbackTheme().feedbackCardPresentation(detents: path.isEmpty ? [.medium] : [.medium, .large])
+
+      }.background(FeedbackSDKPresentationMarker())
+        .feedbackTheme().feedbackCardPresentation(detents: [.medium, .large])
         .presentationBackground(theme.background ?? Color(uiColor: .systemGroupedBackground))
     }
     private func entry(_ title: String, _ symbol: String, showsChevron: Bool = false) -> some View {
       HStack(spacing: 12) {
         Image(systemName: symbol).foregroundStyle(.tint).frame(width: 28)
           .accessibilityHidden(true)
-        Text(title).foregroundStyle(theme.primaryText ?? .primary)
+        Text(title).foregroundStyle(theme.primaryText ?? .primary).lineLimit(1).truncationMode(.tail)
         Spacer(minLength: 0)
         if showsChevron {
           Image(systemName: "chevron.right").font(.caption.weight(.semibold))
@@ -312,7 +321,7 @@ public enum ShakeToShipRoute: Hashable {
     var body: some View {
       VStack(spacing: 4) {
         Image(systemName: "arrow.up").fontWeight(.semibold)
-        Text(idea.voteCount.formatted()).monospacedDigit()
+        Text(idea.voteCount.formatted()).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
       }
       .feedbackFont(.subheadline.weight(.semibold)).foregroundStyle(.tint)
       .frame(minWidth: 48, minHeight: 60)
@@ -329,15 +338,15 @@ public enum ShakeToShipRoute: Hashable {
     var body: some View {
       HStack {
         Label {
-          Text(title).feedbackPrimaryText()
+          Text(title).feedbackPrimaryText().lineLimit(1).truncationMode(.tail)
         } icon: {
-          Image(systemName: systemImage).foregroundStyle(theme.secondaryText ?? .secondary)
+          Image(systemName: systemImage).foregroundStyle(.tint).frame(width: 28)
         }
         Spacer()
         Image(systemName: "chevron.right").font(.caption.weight(.semibold))
           .foregroundStyle(.tertiary).accessibilityHidden(true)
       }
-      .frame(minHeight: 36)
+      .feedbackFont(.body, inherit: false).frame(minHeight: 24)
     }
   }
 #endif

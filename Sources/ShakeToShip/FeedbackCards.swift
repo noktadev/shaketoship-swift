@@ -22,7 +22,8 @@ struct FeedbackCard<Content: View>: View {
         .foregroundStyle(.tint).frame(width: 44, height: 44)
         .background(.tint.opacity(0.15), in: Circle()).accessibilityHidden(true)
       Text(title).feedbackFont(.title3.bold(), inherit: false).feedbackPrimaryText()
-        .lineLimit(1).minimumScaleFactor(0.65).accessibilityAddTraits(.isHeader)
+        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+        .accessibilityAddTraits(.isHeader)
       Text(message).feedbackFont(.subheadline, inherit: false)
         .foregroundStyle(theme.secondaryText ?? .secondary)
         .multilineTextAlignment(.center).lineLimit(3)
@@ -41,8 +42,8 @@ struct FeedbackCardAction: View {
   let title: String
   let action: () -> Void
   var body: some View {
-    Button(action: action) { Text(title).frame(maxWidth: .infinity) }
-      .buttonStyle(.borderedProminent).controlSize(.large)
+    Button(action: action) { Text(title).frame(maxWidth: .infinity, minHeight: 44) }
+      .buttonStyle(.borderedProminent).controlSize(.regular)
   }
 }
 
@@ -165,6 +166,7 @@ struct FeedbackPostCaptureCard: View {
             } else {
               FeedbackCardAction(title: "Send as is") { sendUnchanged() }
             }
+            FeedbackMicrophoneRow()
           }.disabled(acted)
         }.feedbackCardPresentation(dismissDisabled: acted)
       }

@@ -8,6 +8,21 @@
   /// No render server or navigation glass is required by this hostless package test.
   @MainActor
   final class FeedbackHubSnapshotTests: XCTestCase {
+    func testCardActionScalesForAccessibilityAndKeepsMinimumTouchHeight() throws {
+      func size(_ dynamicTypeSize: DynamicTypeSize) throws -> CGSize {
+        let content = FeedbackCardAction(title: "Send the complete report") {}
+          .frame(width: 140)
+          .environment(\.dynamicTypeSize, dynamicTypeSize)
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 1
+        return try XCTUnwrap(renderer.uiImage).size
+      }
+      let regular = try size(.large)
+      let accessible = try size(.accessibility2)
+      XCTAssertGreaterThanOrEqual(regular.height, 44)
+      XCTAssertGreaterThan(accessible.height, regular.height)
+    }
+
     func testHubComponents() async throws {
       for name in [
         "idea-row", "idea-row-dark", "idea-row-large-type", "prompt", "prompt-dark",

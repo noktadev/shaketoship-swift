@@ -154,12 +154,16 @@ enum FeedbackPromptGate {
     promptPresenting: Bool,
     promptsShown: Int,
     lastDismissedAt: TimeInterval?,
-    now: TimeInterval
+    now: TimeInterval,
+    explicitRecordingRequest: Bool = false
   ) -> FeedbackShakeAction {
-    if isRecording { return .stopRecording }
+    if isRecording { return explicitRecordingRequest ? .ignore : .stopRecording }
     // A shake while the prompt is already up must not re-count or re-emit -
     // otherwise a couple of shakes burn the whole per-session cap instantly.
     if busy || reviewPresenting || promptPresenting { return .ignore }
+    // An explicit walkthrough continues the accepted entry. Nag suppression
+    // applies to unsolicited shakes, not the consent step after this button.
+    if explicitRecordingRequest { return .showPrompt }
     if promptsShown >= maxPromptsPerSession { return .ignore }
     if let lastDismissedAt, now - lastDismissedAt < cooldownSeconds { return .ignore }
     return .showPrompt

@@ -6,13 +6,13 @@ import SwiftUI
   /// Optional composition. The host owns all navigation and presentation chrome.
   struct FeedbackHubView: View {
     @Bindable var model: FeedbackHubModel
-    @State private var report = false
+    @State private var report: FeedbackReportPresentation?
     @State private var suggest = false
     @State private var email = false
     var body: some View {
       List {
         Section {
-          Button { report = true } label: {
+          Button { report = FeedbackReportPresentation(screenshot: FeedbackReportScreenshot.captureForReport(model: model)) } label: {
             FeedbackEntryLabel(title: "Report a bug", systemImage: "ladybug")
           }
           if model.config.hub.contains(.ideas) {
@@ -30,15 +30,17 @@ import SwiftUI
         }.feedbackRow()
         if !model.config.hub.contains(.inbox) {
           Section {
-            Button("Email updates", systemImage: "envelope") { email = true }
+            Button { email = true } label: {
+            FeedbackEntryLabel(title: "Email updates", systemImage: "envelope")
+          }.buttonStyle(.plain)
           }.feedbackRow()
         }
         if model.showEmailOffer { Section { FeedbackEmailOfferCard(model: model) }.feedbackRow() }
         FeedbackHubErrorSection(model: model)
       }
       .feedbackListStyle()
-      .sheet(isPresented: $report) {
-        FeedbackHubReport(model: model).presentationDetents([.medium, .large])
+      .sheet(item: $report) { report in
+        FeedbackHubReport(model: model, screenshot: report.screenshot).presentationDetents([.medium, .large])
       }
       .sheet(isPresented: $suggest) { FeedbackSuggestView(model: model) }
       .sheet(isPresented: $email) { FeedbackEmailSheet(model: model) }
@@ -122,6 +124,7 @@ import SwiftUI
     }
   }
   struct FeedbackIdeaRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let idea: FeedbackIdea
     var showsVotes = true
     @Environment(\.shakeToShipTheme) private var theme
@@ -133,6 +136,7 @@ import SwiftUI
         }
         VStack(alignment: .leading, spacing: 6) {
           Text(idea.title).feedbackFont(.headline).foregroundStyle(theme.primaryText ?? .primary)
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1).truncationMode(.tail)
           FeedbackStatusChip(idea: idea)
           if let summary = idea.body ?? idea.replyExcerpt {
             Text(summary).feedbackFont(.subheadline).foregroundStyle(
@@ -487,12 +491,13 @@ import SwiftUI
     @Environment(\.shakeToShipTheme) private var theme
     @Bindable var model: FeedbackHubModel
     @State private var email = false
-    @State private var report = false
+    @State private var report: FeedbackReportPresentation?
     var body: some View {
       List {
         Section {
-          Button("Submit new ticket", systemImage: "plus.circle.fill") { report = true }
-            .frame(minHeight: 52)
+          Button { report = FeedbackReportPresentation(screenshot: FeedbackReportScreenshot.captureForReport(model: model)) } label: {
+            FeedbackEntryLabel(title: "Submit new ticket", systemImage: "plus")
+          }.buttonStyle(.plain)
         }.feedbackRow()
         FeedbackHubErrorSection(model: model)
         if model.inboxLoading && model.inbox.isEmpty {
@@ -516,31 +521,33 @@ import SwiftUI
         } else {
           Section {
             ForEach(model.inbox) { message in
-              HStack(alignment: .top, spacing: 8) {
+              Group {
                 if let id = message.ideaId, model.config.hub.contains(.ideas) {
                   FeedbackRouteLink(route: .idea(id: id)) { ticket(message) }
                     .accessibilityIdentifier("View idea")
                 } else {
                   ticket(message)
                 }
-                Button { Task { await model.acknowledge(message) } } label: {
-                  Circle().fill(.tint).frame(width: 8, height: 8)
-                    .frame(minWidth: 44, minHeight: 44)
-                }
-                .buttonStyle(.borderless).accessibilityLabel("Mark as read")
-                .accessibilityValue("Unread")
+              }
+              .accessibilityValue("Unread")
+              .accessibilityAction(named: "Mark as read") { Task { await model.acknowledge(message) } }
+              .contextMenu {
+                Button("Mark as read") { Task { await model.acknowledge(message) } }
               }.feedbackRow()
             }
           } header: {
             Text("My tickets").foregroundStyle(theme.secondaryText ?? .secondary)
           }
         }
+        FeedbackOwnedReportSection(model: model, refreshToken: report == nil)
         Section {
-          Button("Email updates", systemImage: "envelope") { email = true }
+          Button { email = true } label: {
+            FeedbackEntryLabel(title: "Email updates", systemImage: "envelope")
+          }.buttonStyle(.plain)
         }.feedbackRow()
       }.feedbackListStyle()
         .sheet(isPresented: $email) { FeedbackEmailSheet(model: model) }
-        .sheet(isPresented: $report) { FeedbackHubReport(model: model) }
+        .sheet(item: $report) { report in FeedbackHubReport(model: model, screenshot: report.screenshot) }
         .refreshable { await model.refreshInbox() }.task {
           await model.refreshInbox()
         }
@@ -549,22 +556,31 @@ import SwiftUI
       HStack(alignment: .top, spacing: 12) {
         Image(systemName: message.ideaId == nil ? "doc.text" : "bubble.left.and.text.bubble.right")
           .foregroundStyle(theme.secondaryText ?? .secondary)
-          .frame(width: 40, height: 52)
+          .frame(width: 40, height: 40)
           .background((theme.secondaryText ?? .secondary).opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
           .accessibilityHidden(true)
-        VStack(alignment: .leading, spacing: 6) {
-          Text(message.payload.title ?? "Feedback update").feedbackFont(.headline)
-            .foregroundStyle(theme.primaryText ?? .primary).lineLimit(2)
+        VStack(alignment: .leading, spacing: 3) {
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(message.payload.title ?? "Feedback update").feedbackFont(.headline)
+              .foregroundStyle(theme.primaryText ?? .primary).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 0)
+            Circle().fill(.tint).frame(width: 7, height: 7)
+              .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] }
+              .accessibilityHidden(true)
+          }
           HStack {
             Text(message.kind.replacingOccurrences(of: "_", with: " ").capitalized)
+              .lineLimit(1).padding(.horizontal, 6).padding(.vertical, 2)
+              .background(.tint.opacity(0.08), in: Capsule())
             Spacer(minLength: 8)
             if let date = try? Date(message.createdAt, strategy: .iso8601) {
               Text(date.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated)))
             }
-          }.feedbackFont(.caption).foregroundStyle(theme.secondaryText ?? .secondary)
+          }.feedbackFont(.caption, inherit: false).foregroundStyle(theme.secondaryText ?? .secondary)
+            .lineLimit(1)
           if let text = message.payload.text {
             Text(text).feedbackFont(.subheadline).foregroundStyle(theme.secondaryText ?? .secondary)
-              .fixedSize(horizontal: false, vertical: true)
+              .lineLimit(1).truncationMode(.tail)
           }
         }
       }

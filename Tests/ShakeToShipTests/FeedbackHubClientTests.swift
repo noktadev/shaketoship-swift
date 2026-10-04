@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Observation
 
 @testable import ShakeToShip
 
@@ -63,6 +64,50 @@ struct FeedbackHubClientTests {
       storage
     )
   }
+  @MainActor @Test func publicUnreadStateUsesOnlyCachedInboxAndClearsOnReset() async throws {
+    let transport = HubTestTransport()
+    let (client, root, _) = try fixture(transport: transport, hub: [.inbox])
+    defer {
+      ShakeToShip.model = nil
+      try? FileManager.default.removeItem(at: root)
+    }
+    ShakeToShip.model = nil
+    #expect(await ShakeToShip.unreadInboxCount == 0)
+    #expect(!ShakeToShip.hasUnreadInboxReplies)
+    let model = FeedbackHubModel(client: client, config: await client.config)
+    ShakeToShip.model = model
+    #expect(await ShakeToShip.unreadInboxCount == 0)
+    #expect(await transport.requests.isEmpty)
+    await client.setActive(true)
+    let inbox = #"{"messages":[{"id":"reply","kind":"fixed","ideaId":null,"createdAt":"2026-09-24T00:00:00Z","payload":{"title":"Fixed"}}]}"#
+    await transport.prepare([(201, hubIdentityJSON()), (200, inbox)])
+    await model.refreshInbox()
+    let fetched = await transport.requests.count
+    #expect(await ShakeToShip.unreadInboxCount == 1)
+    #expect(ShakeToShip.hasUnreadInboxReplies)
+    #expect(await transport.requests.count == fetched)
+    // SwiftUI must receive the acknowledgement change, not only the initial count.
+    try await confirmation("cached reply acknowledgement updates SwiftUI") { changed in
+      withObservationTracking {
+        _ = ShakeToShip.hasUnreadInboxReplies
+      } onChange: { changed() }
+      await transport.prepare([(204, "")])
+      await model.acknowledge(try #require(model.inbox.first))
+    }
+    #expect(await ShakeToShip.unreadInboxCount == 0)
+    #expect(!ShakeToShip.hasUnreadInboxReplies)
+    await transport.prepare([(200, inbox)])
+    await model.refreshInbox()
+    #expect(await ShakeToShip.unreadInboxCount == 1)
+    model.active = false
+    #expect(await ShakeToShip.unreadInboxCount == 0)
+    model.active = true
+    model.invalidate()
+    #expect(await ShakeToShip.unreadInboxCount == 0)
+    #expect(!ShakeToShip.hasUnreadInboxReplies)
+    await client.setActive(false)
+  }
+
   @MainActor @Test func activationAndForegroundDoNotReserveUnpresentedPrompts() async throws {
     let transport = HubTestTransport()
     await transport.prepare([(201, hubIdentityJSON()), (204, ""), (204, "")])

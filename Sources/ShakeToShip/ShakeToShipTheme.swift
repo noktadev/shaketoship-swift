@@ -3,6 +3,8 @@ import SwiftUI
 /// Nil values preserve the host environment and native control appearance.
 public struct ShakeToShipTheme {
   public enum ListStyle { case insetGrouped, plain }
+  /// Explicit host language, also carried into the separate recording review window.
+  public var locale: Locale?
   public var accent: Color?
   public var background: Color?
   public var surface: Color?
@@ -17,8 +19,9 @@ public struct ShakeToShipTheme {
     accent: Color? = nil, background: Color? = nil, surface: Color? = nil,
     primaryText: Color? = nil, secondaryText: Color? = nil,
     fontDesign: Font.Design? = nil, cornerRadius: CGFloat? = nil,
-    listStyle: ListStyle? = nil, statusColors: [String: Color] = [:]
+    listStyle: ListStyle? = nil, statusColors: [String: Color] = [:], locale: Locale? = nil
   ) {
+    self.locale = locale
     self.accent = accent
     self.background = background
     self.surface = surface
@@ -145,7 +148,7 @@ struct FeedbackStatusChip: View {
   @Environment(\.shakeToShipTheme) private var theme
   var body: some View {
     let color = theme.statusColors[idea.status] ?? theme.secondaryText ?? .secondary
-    Text(idea.statusLabel).feedbackFont(.caption.weight(.medium))
+    Text(idea.statusLabel).feedbackFont(.caption.weight(.medium), inherit: false).lineLimit(1)
       .foregroundStyle(color)
       .padding(.horizontal, 8).padding(.vertical, 4)
       .background(color.opacity(0.12), in: Capsule())

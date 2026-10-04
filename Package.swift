@@ -4,12 +4,13 @@ import PackageDescription
 
 let package = Package(
   name: "ShakeToShip",
+  defaultLocalization: "en",
   platforms: [.iOS(.v17), .macOS(.v14)],
   products: [.library(name: "ShakeToShip", targets: ["ShakeToShip"])],
   targets: [
     .target(name: "AppUploads"),
     .target(name: "ShakeToShip", dependencies: ["AppUploads"],
-      resources: [.process("PrivacyInfo.xcprivacy")]),
+      resources: [.process("PrivacyInfo.xcprivacy"), .process("Resources")]),
     .testTarget(name: "ShakeToShipTests", dependencies: ["ShakeToShip"], resources: [.copy("Snapshots")]),
     .testTarget(name: "AppUploadsTests", dependencies: ["AppUploads"]),
   ]

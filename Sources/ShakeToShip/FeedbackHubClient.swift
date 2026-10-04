@@ -221,6 +221,7 @@ actor FeedbackHubClient {
     if path.hasPrefix("ideas"), !config.hub.contains(.ideas) { throw FeedbackHubError.inactive }
     if path.hasPrefix("prompts"), !config.hub.contains(.prompts) { throw FeedbackHubError.inactive }
     if path.hasPrefix("v2/inbox"), !config.hub.contains(.inbox) { throw FeedbackHubError.inactive }
+    if path.hasPrefix("v2/reports"), !config.hub.contains(.inbox) { throw FeedbackHubError.inactive }
     let expected = epoch
     let reporter = try await identity()
     try check(expected)
@@ -491,6 +492,45 @@ actor FeedbackHubClient {
     return (try storage.read([FeedbackOwnedSession].self, file: "sessions.json") ?? []).filter {
       $0.generation == state.generation && $0.reporterId == state.identity?.reporterId
     }
+  }
+
+  func reportDetail(_ id: String) async throws -> FeedbackOwnedReportDetail {
+    try check()
+    guard config.hub.contains(.inbox), FeedbackOwnedReportDetail.validID(id),
+      try ownedSessions().contains(where: { $0.id == id && $0.purpose == .report })
+    else { throw FeedbackHubError.identityChanged }
+    let detail = try await decode(FeedbackOwnedReportDetail.self, path: "v2/reports/\(id)")
+    guard detail.id == id else { throw FeedbackHubError.invalidResponse }
+    return detail
+  }
+
+  /// Returns only a local file URL. The reporter token stays on the authenticated request.
+  func reportMedia(
+    for detail: FeedbackOwnedReportDetail, attachment: FeedbackOwnedReportAttachment
+  ) async throws -> URL {
+    try check()
+    guard config.hub.contains(.inbox), FeedbackOwnedReportDetail.validID(detail.id),
+      detail.attachments.contains(attachment),
+      try ownedSessions().contains(where: { $0.id == detail.id && $0.purpose == .report })
+    else { throw FeedbackHubError.identityChanged }
+    let expected = epoch
+    let folder = storage.root.appendingPathComponent("report-media", isDirectory: true)
+      .appendingPathComponent(detail.id, isDirectory: true)
+    let file = folder.appendingPathComponent(attachment.file)
+    if FileManager.default.fileExists(atPath: file.path) {
+      let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+      if size > 0 { return file }
+    }
+    let bytes = try await request("v2/reports/\(detail.id)/media/\(attachment.file)")
+    try check(expected)
+    guard !bytes.isEmpty else { throw FeedbackHubError.invalidResponse }
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    var excludedFolder = folder
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try excludedFolder.setResourceValues(values)
+    try bytes.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    return file
   }
 }
 

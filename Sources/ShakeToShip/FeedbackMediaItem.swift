@@ -21,7 +21,7 @@ enum FeedbackMediaKind: String, Sendable, Equatable, Hashable, Codable {
 /// One item in the composer's media strip. The composer holds 0 to 3 of these,
 /// filled by any mix of entry points: the recorder drops a `.recorded` clip in,
 /// the photo picker adds `.picked` items.
-enum FeedbackMediaItem: Identifiable, Sendable, Equatable {
+enum FeedbackMediaItem: Identifiable, Sendable, Equatable, Codable {
   /// This session's own screen capture, already finalized in the session dir.
   case recorded(URL)
   /// An item copied out of the photo library into the session's staging dir.

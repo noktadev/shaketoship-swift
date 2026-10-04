@@ -6,6 +6,17 @@
 
   @MainActor
   final class FeedbackHubThemeTests: XCTestCase {
+    func testReviewMicrophoneUsesHostLanguageInAnIndependentWindow() async throws {
+      let english = FeedbackMicrophoneRow().environment(\.locale, Locale(identifier: "en"))
+      let spanish = FeedbackMicrophoneRow().environment(\.locale, Locale(identifier: "es"))
+      let overridden = english.shakeToShipTheme(ShakeToShipTheme(locale: Locale(identifier: "es")))
+      let expected = try await renderHosted(spanish)
+      let actual = try await renderHosted(overridden)
+      let fallback = try await renderHosted(english)
+      XCTAssertEqual(expected, actual)
+      XCTAssertNotEqual(expected, fallback)
+    }
+
     func testDefaultThemePreservesHostTintAndFont() throws {
       let control = Button("Host action") {}.buttonStyle(.bordered)
       let original = control.tint(.orange).font(.system(.title, design: .monospaced))

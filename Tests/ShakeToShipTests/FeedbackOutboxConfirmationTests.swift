@@ -45,6 +45,21 @@ import Testing
     FeedbackUploader(config: makeConfig(), transport: t, fileManager: .default, outboxRoot: root)
   }
 
+  @Test func reportDraftIsNeverOfferedUploadedOrPurgedByTheGenericSweep() async throws {
+    let root = try makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let dir = try makeSession(root, "draft", confirmed: true)
+    try Data().write(to: dir.appendingPathComponent(FeedbackReportDraftStore.marker))
+    try Data().write(to: dir.appendingPathComponent(feedbackInterruptedMarker))
+    try backdate(dir)
+    let transport = FakeTransport([])
+    #expect(pendingInterruptedSessions(root: root).isEmpty)
+    let result = await uploader(root, transport).retryOutbox(purgeAge: 0, interruptedRetention: 0)
+    #expect(result == OutboxSweepResult(flushed: 0, queued: 0, purged: 0))
+    #expect(FileManager.default.fileExists(atPath: dir.path))
+    #expect(transport.requests.isEmpty && transport.uploads.isEmpty)
+  }
+
   @Test func confirmedDirIsFlushed() async throws {
     let root = try makeRoot()
     let dir = try makeSession(root, "s1", confirmed: true)

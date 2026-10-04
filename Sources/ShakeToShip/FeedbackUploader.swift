@@ -192,6 +192,7 @@ func pendingInterruptedSessions(
   for entry in entries {
     let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
     guard isDir else { continue }
+    if fileManager.fileExists(atPath: entry.appendingPathComponent(FeedbackReportDraftStore.marker).path) { continue }
     let interrupted = fileManager.fileExists(
       atPath: entry.appendingPathComponent(feedbackInterruptedMarker).path)
     let confirmed = fileManager.fileExists(
@@ -584,7 +585,7 @@ struct FeedbackUploader {
       guard let client = await captureClient() else { throw FeedbackHubError.inactive }
       return FeedbackIdentityTransport(client: client, binding: binding)
     }
-    guard config.hub.isEmpty else { throw FeedbackHubError.identityChanged }
+    guard config.hub.isEmpty || config.allowsLegacyCaptures else { throw FeedbackHubError.identityChanged }
     return transport
   }
 
@@ -597,7 +598,7 @@ struct FeedbackUploader {
     if let binding = try FeedbackCaptureBinding.read(in: dir) {
       guard let client = await captureClient() else { throw FeedbackHubError.inactive }
       _ = try await client.captureIdentity(binding)
-    } else if !config.hub.isEmpty { throw FeedbackHubError.identityChanged }
+    } else if !config.hub.isEmpty && !config.allowsLegacyCaptures { throw FeedbackHubError.identityChanged }
   }
 
   private func presign(
@@ -611,7 +612,7 @@ struct FeedbackUploader {
       guard let client else { throw FeedbackHubError.inactive }
       reporter = try await client.captureIdentity(binding)
     } else {
-      guard config.hub.isEmpty else { throw FeedbackHubError.identityChanged }
+      guard config.hub.isEmpty || config.allowsLegacyCaptures else { throw FeedbackHubError.identityChanged }
       reporter = nil
     }
     var req = URLRequest(url: config.collectorURL.appendingPathComponent("presign"))
@@ -745,6 +746,7 @@ struct FeedbackUploader {
     for entry in entries {
       let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
       guard isDir else { continue }
+      if fileManager.fileExists(atPath: entry.appendingPathComponent(FeedbackReportDraftStore.marker).path) { continue }
       let confirmed = fileManager.fileExists(
         atPath: entry.appendingPathComponent(feedbackConfirmedMarker).path)
       // #472: a finalized-but-interrupted partial (`.interrupted` marker, a
