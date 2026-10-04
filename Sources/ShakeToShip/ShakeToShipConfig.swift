@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 extension ShakeToShipConfig {
   /// The host app's privacy ceiling: what the SDK is allowed to touch at all,
@@ -86,11 +87,17 @@ public struct ShakeToShipConfig: Sendable {
   /// TestFlight tester seeded opt-in ON would have no way to stop
   /// shake-to-record.
   public let onOptOut: (@MainActor @Sendable () -> Void)?
-  /// Optional stable reporter identity (an account/user id). When nil the SDK
-  /// uses a generated per-install anonymous ref (see `FeedbackUserRef`), so
-  /// resolved-issue notifications can find their way back to this device
-  /// either way. Opaque to the platform; capped at 128 characters.
+  /// Legacy capture metadata, capped at 128 characters. With the hub enabled,
+  /// this is an unverified display label. It never proves or recovers identity.
+  /// Call `try await ShakeToShip.resetIdentity()` when the host account changes.
   public let userRef: String?
+  public let hub: HubOptions
+  public let contact: Contact?
+  public let traits: [String: String]?
+  public let accent: Color
+  public let font: Font?
+  /// Published support address or URL provided by the host for moderation requests.
+  public let supportURL: URL?
 
   public init(
     app: String,
@@ -102,7 +109,13 @@ public struct ShakeToShipConfig: Sendable {
     maxDuration: TimeInterval = ShakeToShipConfig.defaultMaxDuration,
     onFunnelEvent: (@MainActor @Sendable (FeedbackFunnelEvent) -> Void)? = nil,
     onOptOut: (@MainActor @Sendable () -> Void)? = nil,
-    userRef: String? = nil
+    userRef: String? = nil,
+    hub: HubOptions = [],
+    contact: Contact? = nil,
+    traits: [String: String]? = nil,
+    accent: Color = .blue,
+    font: Font? = nil,
+    supportURL: URL? = nil
   ) {
     self.app = app
     self.collectorURL = collectorURL
@@ -114,6 +127,12 @@ public struct ShakeToShipConfig: Sendable {
     self.onFunnelEvent = onFunnelEvent
     self.onOptOut = onOptOut
     self.userRef = userRef
+    self.hub = hub
+    self.contact = contact
+    self.traits = traits
+    self.accent = accent
+    self.font = font
+    self.supportURL = supportURL
   }
 }
 
@@ -145,7 +164,47 @@ extension ShakeToShipConfig {
       maxDuration: maxDuration,
       onFunnelEvent: onFunnelEvent,
       onOptOut: onOptOut,
-      userRef: userRef
+      userRef: userRef, hub: hub, contact: contact, traits: traits,
+      accent: accent, font: font, supportURL: supportURL
     )
+  }
+}
+
+public struct HubOptions: OptionSet, Sendable {
+  public let rawValue: Int
+  public init(rawValue: Int) { self.rawValue = rawValue }
+  public static let ideas = HubOptions(rawValue: 1 << 0)
+  public static let inbox = HubOptions(rawValue: 1 << 1)
+  public static let prompts = HubOptions(rawValue: 1 << 2)
+}
+
+public enum Contact: Sendable, Equatable {
+  case email(String)
+}
+
+extension FeedbackGate {
+  static func shouldAttachHub(config: ShakeToShipConfig?, recorderActive: Bool) -> Bool {
+    recorderActive && shouldAttach(config: config) && config?.hub.isEmpty == false
+  }
+}
+
+extension ShakeToShipConfig {
+  struct HubConfigurationID: Equatable {
+    let app: String
+    let origin: URL
+    let secret: String
+    let capabilities: Capabilities
+    let hub: HubOptions
+    let userRef: String?
+    let contact: Contact?
+    let traits: [String: String]?
+    let accent: Color
+    let font: Font?
+    let supportURL: URL?
+  }
+  var hubConfigurationID: HubConfigurationID {
+    HubConfigurationID(app: app, origin: collectorURL, secret: secret, capabilities: capabilities,
+      hub: hub, userRef: userRef, contact: contact, traits: traits, accent: accent,
+      font: font, supportURL: supportURL)
   }
 }

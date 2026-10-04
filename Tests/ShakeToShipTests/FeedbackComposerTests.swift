@@ -139,8 +139,11 @@ import Testing
   /// `Identifiable` drives SwiftUI's `ForEach` over the media strip; two
   /// different files must never collide onto one id.
   @Test func idsAreDistinctPerFile() {
-    #expect(FeedbackMediaItem.recorded(Self.clip).id != FeedbackMediaItem.picked(Self.shot, .image).id)
-    #expect(FeedbackMediaItem.picked(Self.shot, .image).id == FeedbackMediaItem.picked(Self.shot, .image).id)
+    #expect(
+      FeedbackMediaItem.recorded(Self.clip).id != FeedbackMediaItem.picked(Self.shot, .image).id)
+    #expect(
+      FeedbackMediaItem.picked(Self.shot, .image).id
+        == FeedbackMediaItem.picked(Self.shot, .image).id)
   }
 
   /// The recorded clip is the session's own `recording.mov` and uploads under
@@ -374,6 +377,55 @@ import Testing
     #expect(
       try String(contentsOf: dir.appendingPathComponent("attachment-0.jpg"), encoding: .utf8)
         == "second")
+  }
+
+  @Test func retryRemovesDeselectedAttachmentsAfterPartialSave() throws {
+    let dir = try session()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let staging = dir.appendingPathComponent("staging", isDirectory: true)
+    try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+    let shot = try file(staging, "picked.jpg", bytes: "private image")
+    let note = dir.appendingPathComponent("note.txt")
+    try FileManager.default.createDirectory(at: note, withIntermediateDirectories: true)
+    #expect(
+      !persistComposedReport(
+        FeedbackComposerResult(media: [.picked(shot, .image)], note: "first"), in: dir))
+    #expect(names(in: dir).contains("attachment-0.jpg"))
+    try FileManager.default.removeItem(at: note)
+    let protected = [
+      "recording.mov", "recording-1.mov", "events.json", FeedbackCaptureBinding.filename,
+      feedbackConfirmedMarker,
+    ]
+    for name in protected { _ = try file(dir, name, bytes: "preserve-" + name) }
+    #expect(persistComposedReport(FeedbackComposerResult(media: [], note: "revised"), in: dir))
+    #expect(!names(in: dir).contains("attachment-0.jpg"))
+    for name in protected {
+      #expect(
+        try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8) == "preserve-"
+          + name)
+    }
+  }
+
+  @Test func retryClearsOldNoteAndChangesAttachmentKindAfterPartialSave() throws {
+    let dir = try session()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let staging = dir.appendingPathComponent("staging", isDirectory: true)
+    try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+    let shot = try file(staging, "picked.jpg")
+    let missing = staging.appendingPathComponent("missing.mov")
+    #expect(
+      !persistComposedReport(
+        FeedbackComposerResult(
+          media: [.picked(shot, .image), .picked(missing, .video)], note: "remove this text"),
+        in: dir))
+    let clip = try file(staging, "replacement.mov", bytes: "new selection")
+    #expect(
+      persistComposedReport(
+        FeedbackComposerResult(media: [.picked(clip, .video)], note: "  \n "), in: dir))
+    #expect(names(in: dir) == ["attachment-0.mov", "staging"])
+    #expect(
+      try String(contentsOf: dir.appendingPathComponent("attachment-0.mov"), encoding: .utf8)
+        == "new selection")
   }
 
   /// A missing source is reported, not swallowed: the caller surfaces it

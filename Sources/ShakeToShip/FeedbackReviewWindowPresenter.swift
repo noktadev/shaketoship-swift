@@ -2,7 +2,6 @@
 import SwiftUI
 import UIKit
 
-#if !targetEnvironment(simulator) && !targetEnvironment(macCatalyst)
 
 /// Presents `FeedbackComposer` in a dedicated overlay UIWindow so it can
 /// never collide with a host app's own fullScreenCover/sheet presentations
@@ -27,6 +26,7 @@ final class FeedbackReviewWindowPresenter {
   /// interruption path.
   func present(
     data: FeedbackComposerData,
+    theme: ShakeToShipTheme = .init(),
     onSend: @escaping (FeedbackComposerResult) -> Void,
     onDiscard: @escaping () -> Void,
     onOptOut: (@MainActor @Sendable () -> Void)? = nil
@@ -42,8 +42,11 @@ final class FeedbackReviewWindowPresenter {
     // Dismiss BEFORE invoking the decision handler so a slow upload never
     // holds the window on screen (same ordering as the old cover's
     // `reviewSession = nil` first line).
-    window.rootViewController = UIHostingController(
-      rootView: FeedbackComposer(
+    let hostWindow = scene.windows.first(where: { $0.isKeyWindow })
+    window.tintColor = hostWindow?.tintColor
+    window.traitOverrides.preferredContentSizeCategory = hostWindow?.traitCollection.preferredContentSizeCategory ?? .large
+    let controller = UIHostingController(
+      rootView: FeedbackReviewPresentation(
         data: data,
         onSend: { [weak self] result in
           self?.dismiss()
@@ -58,7 +61,12 @@ final class FeedbackReviewWindowPresenter {
             self?.dismiss()
             optOut()
           }
-        }))
+        }, onClose: { [weak self] in self?.dismiss() }).shakeToShipTheme(theme))
+    if data.recorded != nil {
+      controller.view.backgroundColor = .clear
+      window.backgroundColor = .clear
+    }
+    window.rootViewController = controller
     window.isHidden = false  // NOT makeKeyAndVisible() - see type comment.
     self.window = window
 
@@ -109,5 +117,4 @@ final class FeedbackReviewWindowPresenter {
   }
 }
 
-#endif  // DEBUG && !simulator && !catalyst
 #endif  // canImport(UIKit)

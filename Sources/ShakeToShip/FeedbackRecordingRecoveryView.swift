@@ -12,6 +12,7 @@ struct FeedbackRecordingExportCopy: Sendable {
     guard recording.originalFiles.allSatisfy({ $0.deletingLastPathComponent().standardizedFileURL == sourceDirectory }) else {
       throw CocoaError(.fileReadInvalidFileName)
     }
+    guard await ShakeToShip.canAccessCapture(in: sourceDirectory) else { throw FeedbackHubError.identityChanged }
     let path = sourceDirectory.path
     guard await FeedbackUploadLeases.shared.acquire(path) else { throw CocoaError(.fileLocking) }
     do {
@@ -33,6 +34,10 @@ struct FeedbackRecordingExportCopy: Sendable {
         }
       }.value
       await FeedbackUploadLeases.shared.release(path)
+      guard await ShakeToShip.canAccessCapture(in: sourceDirectory) else {
+        result.removeCopies()
+        throw FeedbackHubError.identityChanged
+      }
       return result
     } catch {
       await FeedbackUploadLeases.shared.release(path)
@@ -117,6 +122,12 @@ struct FeedbackRecordingRecoveryView: View {
       }) {
         if let exportCopy { FeedbackRecordingExport(files: exportCopy.files) }
       }
+    }
+    .onReceive(NotificationCenter.default.publisher(for: FeedbackHubModel.identityResetNotification)) { _ in
+      sharing = false
+      exportCopy?.removeCopies()
+      exportCopy = nil
+      onClose()
     }
     .interactiveDismissDisabled(retrying || preparingExport)
   }

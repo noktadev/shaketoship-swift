@@ -10,7 +10,7 @@ let package = Package(
     .target(name: "AppUploads"),
     .target(name: "ShakeToShip", dependencies: ["AppUploads"],
       resources: [.process("PrivacyInfo.xcprivacy")]),
-    .testTarget(name: "ShakeToShipTests", dependencies: ["ShakeToShip"]),
+    .testTarget(name: "ShakeToShipTests", dependencies: ["ShakeToShip"], resources: [.copy("Snapshots")]),
     .testTarget(name: "AppUploadsTests", dependencies: ["AppUploads"]),
   ]
 )

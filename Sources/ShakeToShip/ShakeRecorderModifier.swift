@@ -152,7 +152,10 @@ struct ShakeRecorderModifier: ViewModifier {
   }
 
   @State private var isRecording = false
+  @Environment(\.shakeToShipTheme) private var cardTheme
   @State private var showConfirm = false
+  @State private var hubOpenedByShake = false
+  @State private var showHub = false
   @State private var errorMessage: String?
   /// One logical feedback session; its capture is segmented whenever the app
   /// backgrounds because ReplayKit cannot keep an in-app capture running there.
@@ -223,7 +226,7 @@ struct ShakeRecorderModifier: ViewModifier {
   /// spawn a scan and race to present the same partial twice.
   @State private var offerScanInFlight = false
 
-  private enum PromptOutcome { case pending, record, write, dismiss }
+  private enum PromptOutcome { case pending, record, write, dismiss, ideas, inbox, hub }
 
   /// Whether the composer has anything at all to collect on this host. Drives
   /// the prompt's Write action and, when there is no Record action either,
@@ -300,6 +303,17 @@ struct ShakeRecorderModifier: ViewModifier {
       // window above every presentation instead - the same remedy the review
       // composer already needed on dotself (#406). Touches outside the pill are
       // declined by that window, so the app below keeps all of them.
+      .onReceive(NotificationCenter.default.publisher(for: FeedbackHubModel.identityResetNotification)) { _ in
+        reviewPresenter.dismiss()
+        showHub = false
+        promptOutcome = .dismiss
+        showConfirm = false
+        startGuard.deactivate()
+        // Reset invalidates current starts, but a mounted foreground recorder can start a new report.
+        if UIApplication.shared.applicationState == .active { startGuard.activate() }
+        cursorPresenter.dismiss()
+        if recordingSession != nil { Task { await stopRecording(.interruption) } }
+      }
       .onChange(of: cursorState, initial: true) { _, _ in syncCursorWindow() }
       // Toast sits top-center; the recording bar is only shown on non-island
       // devices and never at the same moment as a post-upload toast.
@@ -311,6 +325,30 @@ struct ShakeRecorderModifier: ViewModifier {
       // under a `fullScreenCover` exactly like the pill did (#1391) - and the
       // call screen is precisely where a first-time user needs to be told that
       // a shake stops the recording. It stays non-interactive either way.
+      .safeAreaInset(edge: .bottom) {
+        if !showHub, let model = ShakeToShip.model, model.active, model.showEmailOffer {
+          FeedbackEmailOfferCard(model: model).feedbackTheme()
+        }
+      }
+      .sheet(isPresented: $showHub, onDismiss: {
+        if hubOpenedByShake { hubOpenedByShake = false; resolvePrompt() }
+      }) {
+        FeedbackHubSheet(
+          initialRoute: ShakeToShip.model?.selectedTab == 1 ? .ideas
+            : ShakeToShip.model?.selectedTab == 2 ? .inbox : nil)
+      }
+      .task(id: config.hubConfigurationID) {
+        showHub = false
+        await ShakeToShip.activate(config: config) { tab in
+          guard !isRecording, !busy, !reviewPresenter.isPresenting else { return }
+          ShakeToShip.model?.selectedTab = tab
+          showHub = true
+        }
+        if !Task.isCancelled, !config.hub.isEmpty, ShakeToShip.client(for: config) != nil {
+          didRetryOutbox = false
+          retryOutboxOnce()
+        }
+      }
       .sheet(isPresented: $showConfirm, onDismiss: resolvePrompt) {
         FeedbackPromptSheet(
           // The prompt is only ever reached when this host can record
@@ -318,6 +356,10 @@ struct ShakeRecorderModifier: ViewModifier {
           // offered here. Write appears alongside it whenever the composer has
           // anything to collect.
           showsWrite: composerEntryAvailable,
+          hub: config.hub,
+          onHub: { promptOutcome = .hub; showConfirm = false },
+          onIdeas: { promptOutcome = .ideas; showConfirm = false },
+          onInbox: { promptOutcome = .inbox; showConfirm = false },
           onRecord: {
             promptOutcome = .record
             showConfirm = false
@@ -331,7 +373,6 @@ struct ShakeRecorderModifier: ViewModifier {
             showConfirm = false
           }
         )
-        .presentationDetents([.height(composerEntryAvailable ? 300 : 240)])
       }
       .alert(
         "Feedback error",
@@ -376,6 +417,7 @@ struct ShakeRecorderModifier: ViewModifier {
         NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
       ) { _ in
         startGuard.activate()
+        if let model = ShakeToShip.model { Task { await model.start() } }
         if recordingSession != nil {
           Task { await resumeRecording() }
         } else {
@@ -411,6 +453,8 @@ struct ShakeRecorderModifier: ViewModifier {
         // Gate flipped off / view torn down: unregister so a stale closure
         // cannot fire into a modifier instance that no longer exists.
         FeedbackManualTrigger.unregister()
+        ShakeToShip.deactivate()
+        showHub = false
         // The cursor's window is ours, not the host view hierarchy's - nothing
         // takes it down implicitly, so it has to go here too (#1391).
         cursorPresenter.dismiss()
@@ -440,7 +484,7 @@ struct ShakeRecorderModifier: ViewModifier {
     let action = FeedbackPromptGate.action(
       isRecording: isRecording,
       busy: busy,
-      reviewPresenting: reviewPresenter.isPresenting,
+      reviewPresenting: reviewPresenter.isPresenting || showHub,
       promptPresenting: showConfirm,
       promptsShown: promptsShown,
       lastDismissedAt: lastDismissedAt,
@@ -449,13 +493,19 @@ struct ShakeRecorderModifier: ViewModifier {
     case .stopRecording:
       Task { await stopRecording(.user) }
     case .showPrompt:
-      // A host that cannot record has nothing to ask about: the prompt exists
-      // to get consent for a capture, so with no capture on offer the shake
-      // opens the composer directly rather than adding a tap that can only
-      // ever mean "Write". A host that can neither record nor compose gets
-      // nothing at all.
+      // Hub-enabled hosts always start at the entry card. Without a hub,
+      // hosts that cannot record keep the direct composer entry.
       let isRecordingAvailable = await FeedbackRecordingAvailability.current(
         capabilities: config.capabilities, read: recordingAvailable)
+      if !config.hub.isEmpty && !isRecordingAvailable {
+        promptsShown += 1
+        config.onFunnelEvent?(.promptShown)
+        promptOutcome = .pending
+        hubOpenedByShake = true
+        ShakeToShip.model?.selectedTab = 0
+        showHub = true
+        return
+      }
       switch FeedbackComposerRules.shakeDestination(
         capabilities: config.capabilities, recordingAvailable: isRecordingAvailable
       ) {
@@ -472,7 +522,7 @@ struct ShakeRecorderModifier: ViewModifier {
         // prompt, and the suppression rules exist for the interruption.
         promptsShown += 1
         config.onFunnelEvent?(.promptShown)
-        openComposer()
+        await openComposer()
       }
     case .ignore:
       break
@@ -487,8 +537,11 @@ struct ShakeRecorderModifier: ViewModifier {
     switch promptOutcome {
     case .record:
       Task { await startRecording() }
+    case .hub: ShakeToShip.presentHub()
+    case .ideas: ShakeToShip.present?(1)
+    case .inbox: ShakeToShip.present?(2)
     case .write:
-      openComposer()
+      Task { await openComposer() }
     case .dismiss, .pending:
       lastDismissedAt = ProcessInfo.processInfo.systemUptime
       config.onFunnelEvent?(.promptDismissed)
@@ -507,9 +560,26 @@ struct ShakeRecorderModifier: ViewModifier {
     // capture, so it would record while the app believes it is idle.
     guard let startToken = startGuard.begin() else { return }
     busy = true
+    let identityRevision = ShakeToShip.model?.revision
     let id = UUID().uuidString
     let dir = outboxRoot().appendingPathComponent(id, isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    if !config.hub.isEmpty {
+      do {
+        guard let client = ShakeToShip.client(for: config) else { throw FeedbackHubError.inactive }
+        try await client.bindCapture(in: dir)
+      } catch {
+        busy = false
+        try? FileManager.default.removeItem(at: dir)
+        errorMessage = error.localizedDescription
+        return
+      }
+      guard identityRevision == ShakeToShip.model?.revision else {
+        busy = false
+        try? FileManager.default.removeItem(at: dir)
+        return
+      }
+    }
 
     let rec = FeedbackRecorder(
       plan: FeedbackGate.capturePlan(for: config, microphoneMuted: FeedbackMicrophonePreference().isMuted),
@@ -558,8 +628,9 @@ struct ShakeRecorderModifier: ViewModifier {
     // #453: the scene deactivated while we were awaiting ReplayKit - this start
     // is stale, so tear it down immediately (finalized+unconfirmed like any other
     // interruption). Runs after `busy = false` so stopRecording proceeds cleanly.
-    if isRecording, startGuard.shouldAbort(startedEpoch: startToken) {
-      if terminatePendingStart {
+    let identityChanged = !config.hub.isEmpty && identityRevision != ShakeToShip.model?.revision
+    if isRecording, startGuard.shouldAbort(startedEpoch: startToken) || identityChanged {
+      if terminatePendingStart || identityChanged {
         await stopRecording(.interruption)
       } else {
         await pauseRecording()
@@ -623,9 +694,19 @@ struct ShakeRecorderModifier: ViewModifier {
   private func resumeRecording() async {
     guard !busy, !isRecording, let lifecycle = recordingSession, let id = sessionId else { return }
     guard await lifecycle.state == .paused else { return }
+    let identityRevision = ShakeToShip.model?.revision
+    guard await ShakeToShip.canAccessCapture(in: outboxRoot().appendingPathComponent(id), allowLegacy: config.hub.isEmpty) else {
+      await stopRecording(.interruption)
+      return
+    }
     busy = true
     do {
       try await lifecycle.resume()
+      guard sessionId == id, config.hub.isEmpty || identityRevision == ShakeToShip.model?.revision else {
+        _ = try? await lifecycle.finalize()
+        busy = false
+        return
+      }
       isRecording = true
       // #669 MUST-FIX 1: the session is live again - clear the
       // pause-durability marker so the launch sweep / foreground offer scan
@@ -700,45 +781,36 @@ struct ShakeRecorderModifier: ViewModifier {
           segments: segments)
         let data = try JSONEncoder().encode(segmentedSession)
         try data.write(to: outDir.appendingPathComponent("events.json"))
-        if reason == .interruption {
-          // A call/background interruption cannot reliably present UI. Leave the
-          // finalized but UNCONFIRMED session in the outbox and tag it
-          // `.interrupted` (#472) so the next foreground offers to send it. The
-          // launch sweep still never auto-uploads it (no `.confirmed` marker) and
-          // preserves it until the offer is accepted or discarded.
-          //
-          // #472 finding 5: the marker is what makes the finalized partial
-          // DISCOVERABLE - if its write fails, the recording would be silently
-          // stranded. `writeFeedbackInterruptedMarker` already retries once; on a
-          // hard failure, retry durably while we still hold the background-task
-          // assertion so a transient disk hiccup does not lose the partial.
-          var marked = writeFeedbackInterruptedMarker(in: outDir)
-          if !marked {
-            for _ in 0..<3 {
-              if writeFeedbackInterruptedMarker(in: outDir) { marked = true; break }
-              try? await Task.sleep(nanoseconds: 100_000_000)
-            }
+        // Every finalized recording remains recoverable until Send or Discard.
+        // The existing draft marker also covers a swipe, outside tap, or scene teardown.
+        var marked = writeFeedbackInterruptedMarker(in: outDir)
+        if !marked {
+          for _ in 0..<3 {
+            if writeFeedbackInterruptedMarker(in: outDir) { marked = true; break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
           }
-          // #472 PARTIAL-5: a terminal marker-write failure would silently strand
-          // the finalized partial (the offer scan is marker-gated). Surface it on
-          // the diagnostic funnel seam instead of swallowing it. Fail safe: keep
-          // the finalized dir on disk (never delete here) so a later re-mark or a
-          // manual recovery can still find the recording rather than lose it.
-          if !marked { config.onFunnelEvent?(.markerFailure(operation: "interrupted-write")) }
-        } else {
+        }
+        // #472 PARTIAL-5: a terminal marker-write failure would silently strand
+        // the finalized partial (the offer scan is marker-gated). Surface it on
+        // the diagnostic funnel seam instead of swallowing it. Fail safe: keep
+        // the finalized dir on disk (never delete here) so a later re-mark or a
+        // manual recovery can still find the recording rather than lose it.
+        if !marked { config.onFunnelEvent?(.markerFailure(operation: "interrupted-write")) }
+        if reason != .interruption {
           // Present the review sheet instead of auto-uploading. Upload/Discard
           // (confirmUpload/discard) own the outbox from here. Presented in a
           // dedicated overlay window - a host app's own covers/sheets suppressed
           // the previous fullScreenCover on dotself (#406). When no scene is
           // available (backgrounded stop), the session stays finalized but
           // UNCONFIRMED in the outbox, exactly like the interruption path above.
+          guard await ShakeToShip.canAccessCapture(in: outDir, allowLegacy: config.hub.isEmpty) else { return }
           let data = composerData(
             id: id,
             dir: outDir,
             events: session.events,
             recorded: outDir.appendingPathComponent(firstSegment.file))
           _ = reviewPresenter.present(
-            data: data,
+            data: data, theme: cardTheme,
             onSend: { result in Task { await send(data, result) } },
             onDiscard: { discard(data) },
             onOptOut: config.onOptOut)
@@ -783,19 +855,36 @@ struct ShakeRecorderModifier: ViewModifier {
   /// cannot record. The session dir and the trail are created here exactly as
   /// `startRecording` creates them, so a written report is an ordinary outbox
   /// session that Send confirms and Discard deletes.
-  private func openComposer() {
+  private func openComposer() async {
     guard recordingSession == nil, !isRecording, !busy, !reviewPresenter.isPresenting else {
       return
     }
+    busy = true
+    defer { busy = false }
+    let identityRevision = ShakeToShip.model?.revision
     let id = UUID().uuidString
     let dir = outboxRoot().appendingPathComponent(id, isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    if !config.hub.isEmpty {
+      do {
+        guard let client = ShakeToShip.client(for: config) else { throw FeedbackHubError.inactive }
+        try await client.bindCapture(in: dir)
+      } catch {
+        try? FileManager.default.removeItem(at: dir)
+        errorMessage = error.localizedDescription
+        return
+      }
+      guard identityRevision == ShakeToShip.model?.revision else {
+        try? FileManager.default.removeItem(at: dir)
+        return
+      }
+    }
     Feedback.shared.startSession(
       sessionId: id, app: config.app, build: buildNumber(), startedAt: iso8601(),
       userRef: FeedbackUserRef.resolve(configured: config.userRef))
     let data = composerData(id: id, dir: dir, events: Feedback.shared.snapshot().events)
     let presented = reviewPresenter.present(
-      data: data,
+      data: data, theme: cardTheme,
       onSend: { result in Task { await send(data, result) } },
       onDiscard: { discard(data) },
       // Opting out abandons this draft: close the trail this composer opened
@@ -870,6 +959,8 @@ struct ShakeRecorderModifier: ViewModifier {
   /// unmarked dir once stale, so the toast must NOT promise a retry.
   private func confirmUpload(_ data: FeedbackComposerData) async {
     let config = config
+    let reportModel = config.hub.isEmpty ? nil : ShakeToShip.model
+    let reportRevision = reportModel?.revision
     config.onFunnelEvent?(.reviewUploaded)
     let root = outboxRoot()
     // #472 finding 5: the user chose Upload, so this partial is no longer a
@@ -901,6 +992,10 @@ struct ShakeRecorderModifier: ViewModifier {
         FeedbackHaptics.success()
       } else {
         FeedbackHaptics.warning()
+      }
+      if result == .uploaded || result == .retryableFailure,
+        let reportModel, ShakeToShip.model === reportModel {
+        reportModel.offerEmail(after: reportRevision)
       }
       showHUD(state)
       config.onFunnelEvent?(.uploadResult(outcome: state.outcome))
@@ -960,9 +1055,15 @@ struct ShakeRecorderModifier: ViewModifier {
     // `FeedbackOfferPlanner` decide present vs re-arm vs drop.
     Task { @MainActor in
       defer { offerScanInFlight = false }
-      let scan = await Task.detached(priority: .utility) {
+      let expected = ShakeToShip.model?.revision
+      let candidates = await Task.detached(priority: .utility) {
         pendingInterruptedSessions(root: root)
       }.value
+      var scan: [FeedbackPendingInterrupted] = []
+      for candidate in candidates {
+        if await ShakeToShip.canAccessCapture(in: candidate.dir, allowLegacy: config.hub.isEmpty) { scan.append(candidate) }
+      }
+      guard expected == ShakeToShip.model?.revision else { return }
       switch FeedbackOfferPlanner.decide(
         scanResult: scan,
         busy: busy,
@@ -986,7 +1087,7 @@ struct ShakeRecorderModifier: ViewModifier {
         // retries; clear it only once the sheet is actually on screen (the user
         // now owns the Upload/Discard decision).
         let presented = reviewPresenter.present(
-          data: offer,
+          data: offer, theme: cardTheme,
           onSend: { result in Task { await send(offer, result) } },
           onDiscard: { discard(offer) },
           onOptOut: config.onOptOut)
@@ -1010,7 +1111,7 @@ struct ShakeRecorderModifier: ViewModifier {
       dir: pending.dir,
       events: events,
       recorded: pending.dir.appendingPathComponent(FeedbackAttachmentNaming.recordingFile),
-      contextNote: "Your recording stopped when you left the app. Send it?")
+      contextNote: "Your saved recording is ready to send.")
   }
 
   /// Fixed user-facing copy for a start failure - never surfaces a raw ReplayKit
@@ -1106,8 +1207,16 @@ struct ShakeRecorderModifier: ViewModifier {
     guard recordingSession == nil, !isRecording, !busy, !reviewPresenter.isPresenting else { return }
     let uploader = FeedbackUploader(config: config, transport: FeedbackBackgroundUploads.transport,
       fileManager: .default, outboxRoot: outboxRoot())
-    guard let recording = uploader.retainedRecordings().first(where: { !dismissedRecoveryIDs.contains($0.id) }) else { return }
-    _ = reviewPresenter.presentRecovery(recording: recording,
+    let expected = ShakeToShip.model?.revision
+    Task { @MainActor in
+      var selected: FeedbackRetainedRecording?
+      for item in uploader.retainedRecordings() where !dismissedRecoveryIDs.contains(item.id) {
+        guard let file = item.originalFiles.first else { continue }
+        if await ShakeToShip.canAccessCapture(in: file.deletingLastPathComponent(), allowLegacy: config.hub.isEmpty) { selected = item; break }
+      }
+      guard let recording = selected, expected == ShakeToShip.model?.revision,
+        recordingSession == nil, !isRecording, !busy, !reviewPresenter.isPresenting else { return }
+      _ = reviewPresenter.presentRecovery(recording: recording,
       onRetry: {
         // Each retry owns its uploader. Do not retain the scanner across
         // repeated callbacks and send that shared value off the main actor.
@@ -1116,9 +1225,11 @@ struct ShakeRecorderModifier: ViewModifier {
         return await retryUploader.upload(sessionId: recording.sessionId)
       },
       onClose: { dismissedRecoveryIDs.insert(recording.id) })
+    }
   }
 
   private func retryOutboxOnce() {
+    if !config.hub.isEmpty, ShakeToShip.client(for: config) == nil { return }
     guard !didRetryOutbox else { return }
     didRetryOutbox = true
     let config = config
@@ -1221,61 +1332,6 @@ struct ShakeRecorderModifier: ViewModifier {
   }
 }
 
-/// The lightweight "Something wrong?" prompt (replaces the old
-/// confirmationDialog). Compact, one-tap dismissable, and it educates the user
-/// that shake/tap stops the recording. Copy lives in the package with sensible
-/// defaults - `ShakeToShipConfig` is deliberately not extended per-app for v1.
-private struct FeedbackPromptSheet: View {
-  /// Whether the composer can collect anything on this host (a note or an
-  /// attachment). False leaves the sheet exactly as it was before the composer
-  /// existed: Record, or not now.
-  let showsWrite: Bool
-  let onRecord: () -> Void
-  let onWrite: () -> Void
-  let onDismiss: () -> Void
-
-  var body: some View {
-    VStack(spacing: 16) {
-      VStack(spacing: 6) {
-        Text("Something wrong?")
-          .font(.headline)
-        Text(FeedbackRecordingCopy.promptExplanation)
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-          .multilineTextAlignment(.center)
-      }
-      VStack(spacing: 10) {
-        // #1389: `.borderedProminent` alone fills with the HOST app's tint and
-        // draws the label white, so a host that tints near-white in dark mode
-        // shipped a white label on a white button. Both halves of the pair are
-        // pinned here - see `FeedbackPromptButtonColors`.
-        Button(action: onRecord) {
-          Text("Record & report")
-            .foregroundStyle(FeedbackPromptButtonColors.labelColor)
-            .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(FeedbackPromptButtonColors.fillColor)
-        if showsWrite {
-          // Both actions land in the same composer; this one just gets there
-          // with an empty media slot. Quieter than Record on purpose - a
-          // recording carries far more for the analysis agent than a sentence.
-          Button(action: onWrite) {
-            Text("Write instead").frame(maxWidth: .infinity)
-          }
-          .buttonStyle(.bordered)
-        }
-        Button("Not now", action: onDismiss)
-          .buttonStyle(.bordered)
-      }
-      Text("Turn off any time in Settings.")
-        .font(.caption2)
-        .foregroundStyle(.tertiary)
-    }
-    .padding(24)
-    .presentationDragIndicator(.visible)
-  }
-}
 
 private extension FeedbackHUDState {
   var tint: Color {

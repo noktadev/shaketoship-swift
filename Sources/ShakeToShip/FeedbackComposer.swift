@@ -79,7 +79,9 @@ enum FeedbackComposerRules {
   ) -> FeedbackShakeDestination {
     if showsRecordAction(
       capabilities: capabilities, recordingAvailable: recordingAvailable
-    ) { return .prompt }
+    ) {
+      return .prompt
+    }
     if capabilities.contains(.text) || capabilities.contains(.photoLibrary) { return .composer }
     return .none
   }
@@ -130,7 +132,20 @@ struct FeedbackComposerResult: Sendable, Equatable {
 @discardableResult
 func persistComposedReport(_ result: FeedbackComposerResult, in dir: URL) -> Bool {
   var ok = true
-  for write in FeedbackComposerRules.attachmentPlan(media: result.media) {
+  let plan = FeedbackComposerRules.attachmentPlan(media: result.media)
+  let selected = Set(plan.map(\.fileName))
+  // A partial save can leave files from the previous selection. Remove only
+  // composer-owned evidence, never recordings, identity bindings, or markers.
+  for index in 0..<FeedbackAttachmentBounds.maxItems {
+    for kind in [FeedbackMediaKind.image, .video] {
+      let name = FeedbackAttachmentNaming.attachmentFile(index: index, kind: kind)
+      let obsolete = dir.appendingPathComponent(name)
+      if !selected.contains(name), FileManager.default.fileExists(atPath: obsolete.path) {
+        do { try FileManager.default.removeItem(at: obsolete) } catch { ok = false }
+      }
+    }
+  }
+  for write in plan {
     let destination = dir.appendingPathComponent(write.fileName)
     do {
       // A retried send (upload failed, user sends again) would otherwise throw
@@ -149,6 +164,11 @@ func persistComposedReport(_ result: FeedbackComposerResult, in dir: URL) -> Boo
         to: dir.appendingPathComponent(FeedbackAttachmentNaming.noteFile), options: .atomic)
     } catch {
       ok = false
+    }
+  } else {
+    let note = dir.appendingPathComponent(FeedbackAttachmentNaming.noteFile)
+    if FileManager.default.fileExists(atPath: note.path) {
+      do { try FileManager.default.removeItem(at: note) } catch { ok = false }
     }
   }
   return ok
@@ -178,6 +198,9 @@ struct FeedbackComposerData: Identifiable {
   let capabilities: Capabilities
   /// Bounds an attached video, per `ShakeToShipConfig.maxAttachmentDuration`.
   let maxAttachmentDuration: TimeInterval
+  let notePrompt: String
+  let sendLabel: String
+  let showsTrail: Bool
 
   init(
     id: String,
@@ -186,6 +209,9 @@ struct FeedbackComposerData: Identifiable {
     recorded: URL? = nil,
     contextNote: String? = nil,
     capabilities: Capabilities = .all,
+    notePrompt: String = "What happened?",
+    sendLabel: String = "Send",
+    showsTrail: Bool = true,
     maxAttachmentDuration: TimeInterval = ShakeToShipConfig.defaultMaxDuration
   ) {
     self.id = id
@@ -195,6 +221,9 @@ struct FeedbackComposerData: Identifiable {
     self.contextNote = contextNote
     self.capabilities = capabilities
     self.maxAttachmentDuration = maxAttachmentDuration
+    self.notePrompt = notePrompt
+    self.sendLabel = sendLabel
+    self.showsTrail = showsTrail
   }
 
   /// Where picked items are staged before Send copies them to their
@@ -214,6 +243,11 @@ struct FeedbackComposer: View {
   let onDiscard: () -> Void
   /// nil -> not rendered. See `ShakeToShipConfig.onOptOut`.
   let onOptOut: (() -> Void)?
+  let actionReset: UUID?
+  let inheritsHostStyle: Bool
+  let formHeader: AnyView?
+  let formFooter: AnyView?
+  @Environment(\.shakeToShipTheme) private var theme
 
   /// 0 to 3 items, in the order the user built them. Seeded with the recorded
   /// clip when the entry point had one.
@@ -249,44 +283,29 @@ struct FeedbackComposer: View {
     data: FeedbackComposerData,
     onSend: @escaping (FeedbackComposerResult) -> Void,
     onDiscard: @escaping () -> Void,
-    onOptOut: (() -> Void)? = nil
+    onOptOut: (() -> Void)? = nil,
+    actionReset: UUID? = nil,
+    inheritsHostStyle: Bool = false,
+    formHeader: AnyView? = nil,
+    formFooter: AnyView? = nil
   ) {
     self.data = data
     self.onSend = onSend
     self.onDiscard = onDiscard
     self.onOptOut = onOptOut
+    self.actionReset = actionReset
+    self.inheritsHostStyle = inheritsHostStyle
+    self.formHeader = formHeader
+    self.formFooter = formFooter
     _media = State(initialValue: data.recorded.map { [.recorded($0)] } ?? [])
     self.player = data.recorded.map { AVPlayer(url: $0) }
   }
 
   var body: some View {
-    VStack(spacing: 0) {
-      preview
-      mediaStrip
-      if let rejectionMessage {
-        Text(rejectionMessage)
-          .font(.caption)
-          .foregroundStyle(.red)
-          .multilineTextAlignment(.center)
-          .padding(.horizontal, 24)
-          .padding(.top, 6)
-      }
-      trail
-      if FeedbackComposerRules.showsNoteField(capabilities: data.capabilities) {
-        noteField
-      }
-      if let contextNote = data.contextNote {
-        Text(contextNote)
-          .font(.footnote)
-          .foregroundStyle(.secondary)
-          .multilineTextAlignment(.center)
-          .padding(.horizontal, 24)
-          .padding(.top, 10)
-      }
-
-      Spacer(minLength: 12)
-      actions
+    Group {
+      if inheritsHostStyle { nativeRows } else { legacyContent }
     }
+    .onChange(of: actionReset) { _, _ in acted = false }
     .onAppear { player?.play() }
     .onDisappear { player?.pause() }
     .sheet(isPresented: $showPicker) {
@@ -294,10 +313,98 @@ struct FeedbackComposer: View {
         selectionLimit: FeedbackComposerRules.remainingSelectionLimit(mediaCount: media.count),
         stagingDirectory: data.stagingDirectory,
         maxAttachmentDuration: data.maxAttachmentDuration,
-        existingCount: media.count,
-        existingBytes: pickedBytes,
-        onFinish: absorb)
-        .ignoresSafeArea()
+        existingCount: media.count, existingBytes: pickedBytes, onFinish: absorb
+      ).ignoresSafeArea()
+    }
+  }
+
+  private var nativeRows: some View {
+    Form {
+      formHeader
+      if FeedbackComposerRules.showsNoteField(capabilities: data.capabilities) {
+        Section {
+          noteInput
+        } header: {
+          Text("Description")
+        } footer: {
+          if let contextNote = data.contextNote { Text(contextNote) }
+        }.feedbackRow()
+      }
+      if !media.isEmpty || FeedbackComposerRules.showsAttach(
+        capabilities: data.capabilities, mediaCount: media.count)
+      {
+        Section("Attachments") {
+          ScrollView(.horizontal) {
+            HStack(alignment: .top, spacing: 12) {
+              ForEach(media) { item in
+                VStack(spacing: 8) {
+                  FeedbackMediaThumbnail(item: item).frame(width: 96, height: 108)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                  if FeedbackComposerRules.showsRemove(for: item) {
+                    Button("Remove", role: .destructive) { remove(item) }
+                      .buttonStyle(.borderless)
+                      .accessibilityLabel("Remove attachment")
+                  }
+                }
+              }
+              if FeedbackComposerRules.showsAttach(
+                capabilities: data.capabilities, mediaCount: media.count)
+              {
+                Button { showPicker = true } label: {
+                  Image(systemName: "plus").font(.title2)
+                    .frame(width: 96, height: 108)
+                    .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                }.buttonStyle(.borderless).accessibilityLabel("Attach a photo or video")
+              }
+            }
+          }.scrollIndicators(.hidden)
+        }.feedbackRow()
+      }
+      formFooter
+      if let rejectionMessage { Section { Text(rejectionMessage) }.feedbackRow() }
+      Section {
+        Button("Discard", role: .destructive) { act { onDiscard() } }.disabled(acted)
+        if let onOptOut { Button("Stop sending feedback", role: .destructive) { act(onOptOut) } }
+      }.feedbackRow()
+    }
+    .feedbackListStyle()
+    .interactiveDismissDisabled(!note.isEmpty || !media.isEmpty)
+    .toolbar {
+      ToolbarItem(placement: .confirmationAction) {
+        Button("Send") { act { onSend(FeedbackComposerResult(media: media, note: note)) } }
+          .accessibilityLabel(data.sendLabel)
+          .disabled(acted || !sendEnabled)
+      }
+    }
+  }
+
+  private var legacyContent: some View {
+    VStack(spacing: 0) {
+      preview
+      mediaStrip
+      if let rejectionMessage {
+        Text(rejectionMessage)
+          .feedbackFont(.caption, inherit: inheritsHostStyle)
+          .foregroundStyle(.red)
+          .multilineTextAlignment(.center)
+          .padding(.horizontal, 24)
+          .padding(.top, 6)
+      }
+      if data.showsTrail { trail }
+      if FeedbackComposerRules.showsNoteField(capabilities: data.capabilities) {
+        noteField
+      }
+      if let contextNote = data.contextNote {
+        Text(contextNote)
+          .feedbackFont(.footnote, inherit: inheritsHostStyle)
+          .foregroundStyle(inheritsHostStyle ? theme.secondaryText ?? .secondary : .secondary)
+          .multilineTextAlignment(.center)
+          .padding(.horizontal, 24)
+          .padding(.top, 10)
+      }
+
+      Spacer(minLength: 12)
+      actions
     }
   }
 
@@ -340,13 +447,14 @@ struct FeedbackComposer: View {
           ZStack(alignment: .topTrailing) {
             FeedbackMediaThumbnail(item: item)
               .frame(width: 64, height: 64)
-              .clipShape(RoundedRectangle(cornerRadius: 8))
+              .clipShape(
+                RoundedRectangle(cornerRadius: inheritsHostStyle ? theme.cornerRadius ?? 0 : 8))
             if FeedbackComposerRules.showsRemove(for: item) {
               Button {
                 remove(item)
               } label: {
                 Image(systemName: "xmark.circle.fill")
-                  .font(.footnote)
+                  .feedbackFont(.footnote, inherit: inheritsHostStyle)
                   .symbolRenderingMode(.palette)
                   .foregroundStyle(.white, .black.opacity(0.6))
                   .padding(3)
@@ -357,17 +465,22 @@ struct FeedbackComposer: View {
           }
         }
         if FeedbackComposerRules.showsAttach(
-          capabilities: data.capabilities, mediaCount: media.count) {
+          capabilities: data.capabilities, mediaCount: media.count)
+        {
           Button {
             rejectionMessage = nil
             showPicker = true
           } label: {
             VStack(spacing: 2) {
               Image(systemName: "photo.badge.plus")
-              Text("Attach").font(.caption2)
+              Text("Attach").feedbackFont(.caption2, inherit: inheritsHostStyle)
             }
+            .foregroundStyle(inheritsHostStyle ? theme.primaryText ?? .primary : .primary)
             .frame(width: 64, height: 64)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .background(
+              inheritsHostStyle && theme.surface != nil
+                ? AnyShapeStyle(theme.surface!) : AnyShapeStyle(.ultraThinMaterial),
+              in: RoundedRectangle(cornerRadius: inheritsHostStyle ? theme.cornerRadius ?? 0 : 8))
           }
           .buttonStyle(.plain)
           .accessibilityLabel("Attach a photo or video")
@@ -387,10 +500,11 @@ struct FeedbackComposer: View {
           ForEach(Array(screenChips.enumerated()), id: \.offset) { _, chip in
             HStack(spacing: 4) {
               Text(String(format: "%.1fs", chip.t))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .feedbackFont(.caption2.monospacedDigit(), inherit: inheritsHostStyle)
+                .foregroundStyle(
+                  inheritsHostStyle ? theme.secondaryText ?? .secondary : .secondary)
               Text(chip.screen)
-                .font(.caption2.weight(.medium))
+                .feedbackFont(.caption2.weight(.medium), inherit: inheritsHostStyle)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -403,21 +517,38 @@ struct FeedbackComposer: View {
       .padding(.top, 12)
 
       Text(data.id)
-        .font(.caption2.monospaced())
+        .feedbackFont(.caption2.monospaced(), inherit: inheritsHostStyle)
         .foregroundStyle(.tertiary)
         .padding(.top, 8)
     }
   }
 
-  private var noteField: some View {
-    TextField("What happened?", text: $note, axis: .vertical)
-      .lineLimit(2...5)
-      .textFieldStyle(.plain)
-      .padding(10)
-      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-      .padding(.horizontal, 16)
-      .padding(.top, 12)
+  private var noteInput: some View {
+    TextField(data.notePrompt, text: $note, axis: .vertical)
+        .lineLimit(3...8)
+      .foregroundStyle(inheritsHostStyle ? theme.primaryText ?? .primary : .primary)
       .accessibilityLabel("Note")
+  }
+  private var noteField: some View {
+    Group {
+      if inheritsHostStyle {
+        if let radius = theme.cornerRadius {
+          noteInput.textFieldStyle(.plain).padding(10)
+            .background(
+              theme.surface ?? Color(uiColor: .secondarySystemBackground),
+              in: RoundedRectangle(cornerRadius: radius))
+        } else if let surface = theme.surface {
+          noteInput.textFieldStyle(.plain).padding(10).background(surface)
+        } else {
+          noteInput.textFieldStyle(.roundedBorder)
+        }
+      } else {
+        noteInput.textFieldStyle(.plain).padding(10)
+          .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+      }
+    }
+    .padding(.horizontal, 16)
+    .padding(.top, 12)
   }
 
   /// Discard, Send and the optional opt-out keep their present positions and
@@ -426,26 +557,23 @@ struct FeedbackComposer: View {
   private var actions: some View {
     VStack(spacing: 0) {
       HStack(spacing: 12) {
-        Button(role: .destructive) { act { onDiscard() } } label: {
+        Button(role: .destructive) {
+          act { onDiscard() }
+        } label: {
           Label("Discard", systemImage: "trash")
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
         .disabled(acted)
 
-        // Same pair as the shake prompt's primary action: `.borderedProminent`
-        // on its own inherits the HOST app's tint for the fill and draws the
-        // label white, which is invisible under a near-white tint (#1389).
-        Button {
-          act { onSend(FeedbackComposerResult(media: media, note: note)) }
-        } label: {
-          Label("Send", systemImage: "arrow.up.circle.fill")
+        if inheritsHostStyle {
+          sendButton.buttonStyle(.bordered)
+        } else {
+          sendButton.buttonStyle(.borderedProminent)
+            .tint(FeedbackPromptButtonColors.fillColor)
             .foregroundStyle(FeedbackPromptButtonColors.labelColor)
-            .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(FeedbackPromptButtonColors.fillColor)
-        .disabled(acted || !sendEnabled)
+
       }
       .padding(.horizontal, 16)
       .padding(.top, 16)
@@ -453,9 +581,11 @@ struct FeedbackComposer: View {
       if let onOptOut {
         // Deliberately below and quieter than Discard/Send: this is not a
         // decision about THIS report, it is a decision about the feature.
-        Button(role: .destructive) { act { onOptOut() } } label: {
+        Button(role: .destructive) {
+          act { onOptOut() }
+        } label: {
           Text("Stop sending feedback")
-            .font(.footnote)
+            .feedbackFont(.footnote, inherit: inheritsHostStyle)
         }
         .buttonStyle(.plain)
         .disabled(acted)
@@ -465,6 +595,15 @@ struct FeedbackComposer: View {
         Color.clear.frame(height: 16)
       }
     }
+  }
+
+  private var sendButton: some View {
+    Button {
+      act { onSend(FeedbackComposerResult(media: media, note: note)) }
+    } label: {
+      Label(data.sendLabel, systemImage: "arrow.up.circle.fill")
+        .frame(maxWidth: .infinity)
+    }.disabled(acted || !sendEnabled)
   }
 
   /// Absorbs a finished picker session: admitted items join the strip, the

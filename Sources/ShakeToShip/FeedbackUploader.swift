@@ -22,6 +22,17 @@ struct URLSessionTransport: FeedbackTransport {
   private let session: URLSession
   init(session: URLSession = .shared) { self.session = session }
 
+  /// Private hub responses must never enter or reuse the host app's HTTP cache.
+  /// The hub owns its reporter-scoped, reset-aware offline cache separately.
+  static func hub() -> Self {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.urlCache = nil
+    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    configuration.httpCookieStorage = nil
+    configuration.urlCredentialStorage = nil
+    return Self(session: URLSession(configuration: configuration))
+  }
+
   func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
     let (data, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse else {
@@ -69,7 +80,7 @@ private struct FeedbackPermanentFailure: Codable {
   var result: FeedbackUploadResult? {
     switch statusCode {
     case 413: .recordingTooLarge
-    case 401, 403: .rejected(statusCode: statusCode)
+    case 401, 403, 404: .rejected(statusCode: statusCode)
     default: nil
     }
   }
@@ -96,9 +107,9 @@ func writeFeedbackConfirmedMarker(
 }
 
 /// Marker written into a session dir when a recording is finalized after a
-/// backgrounding interruption (#472). Like `.confirmed` it is NEVER uploaded
+/// backgrounding interruption or retained for a later review. Like `.confirmed` it is NEVER uploaded
 /// because the evidence plan does not include it. It does NOT gate the launch
-/// sweep. It tags the partial so the next foreground can offer to send it.
+/// sweep. It tags the recording so the next foreground can offer to send it.
 let feedbackInterruptedMarker = ".interrupted"
 
 /// Writes the interruption marker into `dir` (retries once). See
@@ -226,14 +237,17 @@ struct FeedbackUploader {
   /// Root of `Documents/feedback-outbox`; each session lives in `<root>/<sessionId>/`.
   private let outboxRoot: URL
   private let recovery: FeedbackVideoRecovery
+  private let hubClient: FeedbackHubClient?
 
   init(
     config: ShakeToShipConfig,
     transport: FeedbackTransport,
     fileManager: FileManager,
     outboxRoot: URL,
-    videoCompressor: any FeedbackVideoCompressing = AVFeedbackVideoCompressor()
+    videoCompressor: any FeedbackVideoCompressing = AVFeedbackVideoCompressor(),
+    hubClient: FeedbackHubClient? = nil
   ) {
+    self.hubClient = hubClient
     self.config = config
     self.transport = transport
     self.fileManager = fileManager
@@ -246,6 +260,7 @@ struct FeedbackUploader {
     let sessionId: String
     let files: [String]
     let userRef: String?
+    let purpose: FeedbackCapturePurpose?
     let startedAt: String
     let appBundleId: String
     let sdkVersion: String
@@ -269,6 +284,7 @@ struct FeedbackUploader {
 
   private struct PresignResponse: Decodable {
     let urls: [String: String]
+    let sessionRecordId: String?
     let multipart: MultipartUploadCapabilities?
   }
 
@@ -304,6 +320,9 @@ struct FeedbackUploader {
 
   private func uploadExclusively(sessionId: String) async -> FeedbackUploadResult {
     let dir = outboxRoot.appendingPathComponent(sessionId, isDirectory: true)
+    do { try await validateCapture(in: dir) }
+    catch FeedbackHubError.identityChanged { return .rejected(statusCode: 403) }
+    catch { return .retryableFailure }
     guard let present = existingFiles(in: dir) else { return .retryableFailure }
     let failure = permanentFailure(in: dir)
     if let failure, failure != .recordingTooLarge { return failure }
@@ -378,16 +397,18 @@ struct FeedbackUploader {
         uploaded = try JSONDecoder().decode([String: UploadedFile].self, from: Data(contentsOf: checkpointURL))
       }
       for name in present {
+        try await validateCapture(in: dir)
         let original = dir.appendingPathComponent(name)
         if multipartFiles.contains(name), let capability {
           guard let value = response.urls[name], let url = URL(string: value) else {
             throw FeedbackUploadError.missingPresignedURL(name)
           }
-          try await MultipartUploader(transport: transport, fileManager: fileManager).upload(
+          let transfer = try await transferTransport(in: dir)
+          try await MultipartUploader(transport: transfer, fileManager: fileManager).upload(
             sourceURL: original, stateDirectory: dir.appendingPathComponent(".multipart-" + name),
             objectID: "\(config.app)/\(sessionId)/\(name)", signedURL: url, capabilities: capability,
             contentType: "video/quicktime",
-            scheduling: transport.supportsBackgroundUploads ? .backgroundQueued : .bounded)
+            scheduling: transfer.supportsBackgroundUploads ? .backgroundQueued : .bounded)
           continue
         }
         let identity = multipartEnabled ? try UploadedFile.read(original) : nil
@@ -411,8 +432,15 @@ struct FeedbackUploader {
       }
       try fileManager.removeItem(at: dir)
       return .uploaded
+    } catch FeedbackHubError.identityChanged {
+      return .rejected(statusCode: 403)
+    } catch FeedbackHubError.authentication {
+      return .rejected(statusCode: 401)
     } catch FeedbackUploadError.presignHTTPStatus(let statusCode) {
-      let result = Self.presignResult(for: statusCode)
+      // A verified capture denied by the idea/reset guard must not retry forever.
+      let owned = (try? FeedbackCaptureBinding.read(in: dir)) != nil
+      let result: FeedbackUploadResult = statusCode == 404 && owned
+        ? .rejected(statusCode: statusCode) : Self.presignResult(for: statusCode)
       persistPermanentFailure(result, in: dir, recoveredCopyRejected: recovery.isReady(in: dir))
       return result
     } catch {
@@ -512,6 +540,7 @@ struct FeedbackUploader {
     guard let putURLString = urls[name], let putURL = URL(string: putURLString) else {
       throw FeedbackUploadError.missingPresignedURL(name)
     }
+    try await validateCapture(in: dir)
     var req = URLRequest(url: putURL)
     req.httpMethod = "PUT"
     if name == feedbackCompletionFile {
@@ -521,7 +550,9 @@ struct FeedbackUploader {
     if let bytes = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize {
       req.setValue(String(bytes), forHTTPHeaderField: "Content-Length")
     }
-    let (_, response) = try await transport.upload(req, fromFile: file)
+    let transfer = try await transferTransport(in: dir)
+    let (_, response) = try await transfer.upload(req, fromFile: file)
+    try await validateCapture(in: dir)
     return Self.objectPutResult(for: response.statusCode)
   }
 
@@ -548,17 +579,51 @@ struct FeedbackUploader {
     return digits.count == 3 && digits.allSatisfy(\.isNumber) && Int(digits).map { $0 >= 2 } == true
   }
 
+  private func transferTransport(in dir: URL) async throws -> any FeedbackTransport {
+    if let binding = try FeedbackCaptureBinding.read(in: dir) {
+      guard let client = await captureClient() else { throw FeedbackHubError.inactive }
+      return FeedbackIdentityTransport(client: client, binding: binding)
+    }
+    guard config.hub.isEmpty else { throw FeedbackHubError.identityChanged }
+    return transport
+  }
+
+  private func captureClient() async -> FeedbackHubClient? {
+    if let hubClient { return hubClient }
+    return await ShakeToShip.client(for: config)
+  }
+
+  private func validateCapture(in dir: URL) async throws {
+    if let binding = try FeedbackCaptureBinding.read(in: dir) {
+      guard let client = await captureClient() else { throw FeedbackHubError.inactive }
+      _ = try await client.captureIdentity(binding)
+    } else if !config.hub.isEmpty { throw FeedbackHubError.identityChanged }
+  }
+
   private func presign(
     sessionId: String, files: [String], manifest: PresignManifest
   ) async throws -> PresignResponse {
+    let directory = outboxRoot.appendingPathComponent(sessionId, isDirectory: true)
+    let binding = try FeedbackCaptureBinding.read(in: directory)
+    let client = await captureClient()
+    let reporter: FeedbackReporterIdentity?
+    if let binding {
+      guard let client else { throw FeedbackHubError.inactive }
+      reporter = try await client.captureIdentity(binding)
+    } else {
+      guard config.hub.isEmpty else { throw FeedbackHubError.identityChanged }
+      reporter = nil
+    }
     var req = URLRequest(url: config.collectorURL.appendingPathComponent("presign"))
     req.httpMethod = "POST"
     req.setValue(config.secret, forHTTPHeaderField: "x-feedback-secret")
+    req.setValue(reporter?.reporterToken, forHTTPHeaderField: "x-reporter-token")
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.httpBody = try JSONEncoder().encode(
       PresignRequestBody(
         app: config.app, sessionId: sessionId, files: files,
-        userRef: FeedbackUserRef.resolve(configured: config.userRef),
+        userRef: reporter == nil ? FeedbackUserRef.resolve(configured: config.userRef) : nil,
+        purpose: binding?.purpose,
         startedAt: manifest.startedAt,
         appBundleId: manifest.appBundleId,
         sdkVersion: manifest.sdkVersion,
@@ -567,11 +632,23 @@ struct FeedbackUploader {
         capSeconds: manifest.capSeconds,
         state: manifest.state,
         transcribe: manifest.transcribe))
-    let (data, resp) = try await transport.perform(req)
-    guard resp.statusCode == 200 else {
-      throw FeedbackUploadError.presignHTTPStatus(resp.statusCode)
+    let data: Data
+    if let binding, let client {
+      do { data = try await client.capturePresign(req, binding: binding) }
+      catch FeedbackHubError.http(let status, _, _) { throw FeedbackUploadError.presignHTTPStatus(status) }
+    } else {
+      let (body, resp) = try await transport.perform(req)
+      guard resp.statusCode == 200 else { throw FeedbackUploadError.presignHTTPStatus(resp.statusCode) }
+      data = body
     }
-    return try JSONDecoder().decode(PresignResponse.self, from: data)
+    let response = try JSONDecoder().decode(PresignResponse.self, from: data)
+    if let binding, let client, let reporter {
+      _ = try await client.captureIdentity(binding)
+      if let id = response.sessionRecordId {
+        try await client.saveSessionRecord(id, captureId: sessionId, binding: binding, reporter: reporter)
+      }
+    }
+    return response
   }
 
   /// Stores the complete v2 manifest before the first presign. Evidence files

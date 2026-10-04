@@ -39,6 +39,7 @@ public enum FeedbackBackgroundUploads {
 
   private static func resumeConfirmedUploads() async {
     guard let configuration, let root, let session else { return }
+    if !configuration.hub.isEmpty, ShakeToShip.client(for: configuration) == nil { return }
     await session.reconnect()
     let uploader = FeedbackUploader(config: configuration,
       transport: FeedbackBackgroundTransport(session: session),
