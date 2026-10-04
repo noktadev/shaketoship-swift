@@ -321,7 +321,17 @@ struct FeedbackUploader {
 
   private func uploadExclusively(sessionId: String) async -> FeedbackUploadResult {
     let dir = outboxRoot.appendingPathComponent(sessionId, isDirectory: true)
-    do { try await validateCapture(in: dir) }
+    do {
+      if try FeedbackRecordingEdit.read(in: dir) != nil,
+        !fileManager.fileExists(atPath: dir.appendingPathComponent(feedbackUploadManifestFile).path) {
+        for name in ["recording.mov", "events.json"] {
+          guard (try FeedbackRecordingEdit.file(name, in: dir).resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0 else {
+            throw FeedbackVideoRecoveryError.invalidMedia
+          }
+        }
+      }
+      try await validateCapture(in: dir)
+    }
     catch FeedbackHubError.identityChanged { return .rejected(statusCode: 403) }
     catch { return .retryableFailure }
     guard let present = existingFiles(in: dir) else { return .retryableFailure }
@@ -329,10 +339,10 @@ struct FeedbackUploader {
     if let failure, failure != .recordingTooLarge { return failure }
     let videos = present.filter { $0.hasSuffix(".mov") }
     let largeFiles = videos.filter {
-      ((try? dir.appendingPathComponent($0).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 10 * 1024 * 1024
+      ((try? FeedbackRecordingEdit.file($0, in: dir).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 10 * 1024 * 1024
     }
     let largeVideos = videos.filter {
-      ((try? dir.appendingPathComponent($0).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+      ((try? FeedbackRecordingEdit.file($0, in: dir).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         > FeedbackVideoRecovery.maximumBytes
     }
     let existingMultipart = videos.filter {
@@ -357,7 +367,7 @@ struct FeedbackUploader {
       let capability = response?.multipart.flatMap { $0.isSupported ? $0 : nil }
       if !existingMultipart.isEmpty, capability == nil { return .retryableFailure }
       let oversizedVideos = capability.map { cap in videos.filter {
-        ((try? dir.appendingPathComponent($0).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > cap.effectiveMaximumBytes
+        ((try? FeedbackRecordingEdit.file($0, in: dir).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > cap.effectiveMaximumBytes
       } } ?? []
       if !Set(existingMultipart).isDisjoint(with: oversizedVideos) {
         persistPermanentFailure(.recordingTooLarge, in: dir)
@@ -399,7 +409,7 @@ struct FeedbackUploader {
       }
       for name in present {
         try await validateCapture(in: dir)
-        let original = dir.appendingPathComponent(name)
+        let original = FeedbackRecordingEdit.file(name, in: dir)
         if multipartFiles.contains(name), let capability {
           guard let value = response.urls[name], let url = URL(string: value) else {
             throw FeedbackUploadError.missingPresignedURL(name)
@@ -470,7 +480,7 @@ struct FeedbackUploader {
       guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
         fileManager.fileExists(atPath: dir.appendingPathComponent(feedbackConfirmedMarker).path),
         permanentFailure(in: dir) != nil || recovery.hasAttempt(in: dir) || hasMultipartState(in: dir),
-        let files = existingFiles(in: dir) else { return nil }
+        let files = existingFiles(in: dir, originals: true) else { return nil }
       let originals = files.filter { $0.hasSuffix(".mov") }.map { dir.appendingPathComponent($0) }
       guard !originals.isEmpty else { return nil }
       return FeedbackRetainedRecording(sessionId: dir.lastPathComponent, originalFiles: originals,
@@ -500,19 +510,20 @@ struct FeedbackUploader {
 
   /// Evidence files that exist in `dir`, in deterministic upload order.
   /// Returns nil when one attachment index has conflicting extensions.
-  private func existingFiles(in dir: URL) -> [String]? {
+  private func existingFiles(in dir: URL, originals: Bool = false) -> [String]? {
     let entries =
       (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
     let additionalSegments = entries.map(\.lastPathComponent)
       .filter(Self.isAdditionalSegment)
       .sorted()
-    var evidence = ["events.json", FeedbackAttachmentNaming.recordingFile] + additionalSegments
+    let edited = !originals && fileManager.fileExists(atPath: dir.appendingPathComponent(FeedbackRecordingEdit.marker).path)
+    var evidence = ["events.json", FeedbackAttachmentNaming.recordingFile] + (edited ? [] : additionalSegments)
     if hasNonBlankNote(in: dir) {
       evidence.append(FeedbackAttachmentNaming.noteFile)
     }
     guard let attachments = attachmentFiles(in: dir) else { return nil }
     evidence += attachments
-    return evidence.filter { fileManager.fileExists(atPath: dir.appendingPathComponent($0).path) }
+    return evidence.filter { fileManager.fileExists(atPath: (originals ? dir.appendingPathComponent($0) : FeedbackRecordingEdit.file($0, in: dir)).path) }
   }
 
   private func hasNonBlankNote(in dir: URL) -> Bool {
@@ -547,7 +558,7 @@ struct FeedbackUploader {
     if name == feedbackCompletionFile {
       req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     }
-    let file = recovery.copy(for: name, in: dir) ?? dir.appendingPathComponent(name)
+    let file = recovery.copy(for: name, in: dir) ?? FeedbackRecordingEdit.file(name, in: dir)
     if let bytes = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize {
       req.setValue(String(bytes), forHTTPHeaderField: "Content-Length")
     }
@@ -671,7 +682,7 @@ struct FeedbackUploader {
   /// Builds the complete v2 manifest from the session sidecar. A damaged
   /// legacy outbox still gets a valid manifest with its directory timestamp.
   private func makeManifest(in dir: URL, files: [String]) async -> PresignManifest {
-    let eventsURL = dir.appendingPathComponent("events.json")
+    let eventsURL = FeedbackRecordingEdit.file("events.json", in: dir)
     let startedAt: String
     if
       let data = try? Data(contentsOf: eventsURL),
@@ -691,7 +702,7 @@ struct FeedbackUploader {
     }
     var hasNarration = false
     for name in recordingFiles {
-      let asset = AVURLAsset(url: dir.appendingPathComponent(name))
+      let asset = AVURLAsset(url: FeedbackRecordingEdit.file(name, in: dir))
       if let tracks = try? await asset.load(.tracks),
         tracks.contains(where: { $0.mediaType == .audio })
       {
@@ -706,7 +717,7 @@ struct FeedbackUploader {
       sdkVersion: shakeToShipSDKVersion,
       hasNarration: hasNarration,
       hasAppAudio: false,
-      capSeconds: config.maxDuration,
+      capSeconds: (try? FeedbackRecordingEdit.read(in: dir))?.duration ?? config.maxDuration,
       state: "finished",
       transcribe: config.transcription)
   }

@@ -100,7 +100,7 @@ struct FeedbackVideoRecovery {
       for name in names {
         try Task.checkCancellation()
         let temporary = copies.appendingPathComponent("partial-\(UUID().uuidString).mov")
-        try await compressor.compress(source: dir.appendingPathComponent(name), destination: temporary,
+        try await compressor.compress(source: FeedbackRecordingEdit.file(name, in: dir), destination: temporary,
           maximumBytes: Self.maximumBytes)
         let bytes = try temporary.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         guard bytes > 0, bytes <= Self.maximumBytes else { throw FeedbackVideoRecoveryError.tooLarge }

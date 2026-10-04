@@ -100,6 +100,8 @@ struct FeedbackSession: Codable, Sendable, Equatable {
   /// Ordered capture files for this logical session. Optional so sidecars from
   /// before segmented recording remain source- and wire-compatible.
   let segments: [FeedbackRecordingSegment]?
+  let dev_context: FeedbackDevContext?
+  let duration_seconds: Double?
 
   init(
     session_id: String,
@@ -108,7 +110,9 @@ struct FeedbackSession: Codable, Sendable, Equatable {
     started_at: String,
     user_ref: String? = nil,
     events: [FeedbackEvent],
-    segments: [FeedbackRecordingSegment]? = nil
+    segments: [FeedbackRecordingSegment]? = nil,
+    dev_context: FeedbackDevContext? = nil,
+    duration_seconds: Double? = nil
   ) {
     self.session_id = session_id
     self.app = app
@@ -117,5 +121,7 @@ struct FeedbackSession: Codable, Sendable, Equatable {
     self.user_ref = user_ref
     self.events = events
     self.segments = segments
+    self.dev_context = dev_context
+    self.duration_seconds = duration_seconds
   }
 }

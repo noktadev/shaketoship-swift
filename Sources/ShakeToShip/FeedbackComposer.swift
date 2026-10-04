@@ -86,6 +86,27 @@ enum FeedbackComposerRules {
     return .none
   }
 
+  /// The hub entry order. Recording first where a recording can start now,
+  /// with the text form as the secondary "Write it instead" when the host
+  /// collects text. Elsewhere the form keeps its "Report a bug" row, so no
+  /// Record button is dead and no Write action opens a form without a text field.
+  static func hubEntryActions(
+    capabilities: Capabilities, recordingAvailable: Bool, hub: HubOptions
+  ) -> [FeedbackHubEntryAction] {
+    (showsRecordAction(capabilities: capabilities, recordingAvailable: recordingAvailable)
+      ? [.record, showsNoteField(capabilities: capabilities) ? .write : .report] : [.report])
+      + (hub.contains(.ideas) ? [.suggest, .ideas] : [])
+      + (hub.contains(.inbox) ? [.inbox] : [])
+  }
+
+  /// The consent card's secondary action, named for what the composer collects.
+  /// Nil when the composer has nothing to collect.
+  static func writeEntryTitle(capabilities: Capabilities) -> String? {
+    if showsNoteField(capabilities: capabilities) { return FeedbackHubEntryAction.write.title }
+    if showsAttach(capabilities: capabilities, mediaCount: 0) { return "Add an attachment instead" }
+    return nil
+  }
+
   /// Picked items numbered from zero in composer order. The recorded clip is
   /// skipped: it is already `recording.mov` in the session dir and is never
   /// re-written as an attachment.
@@ -118,6 +139,51 @@ struct FeedbackComposerResult: Sendable, Equatable {
   init(media: [FeedbackMediaItem], note: String) {
     self.media = media
     self.note = note
+  }
+
+  /// The recorded path: the clip plus one optional note. The model writes the title.
+  static func recorded(_ recording: URL, note: String) -> FeedbackComposerResult {
+    FeedbackComposerResult(media: [.recorded(recording)], note: note)
+  }
+}
+
+/// The post-capture card's note, kept as `note.txt` in the unconfirmed capture
+/// directory while the user types. Nothing uploads without `.confirmed`, Send
+/// rewrites the file through `persistComposedReport`, and Discard removes the
+/// directory, so a dismissal or background interruption keeps the note for the
+/// recovery offer.
+enum FeedbackRecordedNoteDraft {
+  @discardableResult
+  static func save(_ note: String, in dir: URL) -> Bool {
+    let url = dir.appendingPathComponent(FeedbackAttachmentNaming.noteFile)
+    do {
+      if let contents = FeedbackComposerRules.noteFileContents(note: note) {
+        try Data(contents.utf8).write(to: url, options: .atomic)
+      } else if FileManager.default.fileExists(atPath: url.path) {
+        try FileManager.default.removeItem(at: url)
+      }
+      return true
+    } catch { return false }
+  }
+
+  static func load(in dir: URL) -> String {
+    (try? String(contentsOf: dir.appendingPathComponent(FeedbackAttachmentNaming.noteFile), encoding: .utf8)) ?? ""
+  }
+}
+
+/// One row or action on the hub entry, in `FeedbackComposerRules.hubEntryActions` order.
+enum FeedbackHubEntryAction: Equatable, Sendable {
+  case record, write, report, suggest, ideas, inbox
+
+  var title: String {
+    switch self {
+    case .record: "Record a walkthrough"
+    case .write: "Write it instead"
+    case .report: "Report a bug"
+    case .suggest: "Suggest an idea"
+    case .ideas: "Ideas"
+    case .inbox: "Inbox"
+    }
   }
 }
 
@@ -255,6 +321,14 @@ struct FeedbackComposerData: Identifiable {
     self.titlePrompt = titlePrompt
     self.initialTitle = initialTitle
     self.initialNote = initialNote
+  }
+
+  /// The same capture with a note the review card already collected.
+  func withInitialNote(_ note: String) -> FeedbackComposerData {
+    FeedbackComposerData(id: id, dir: dir, events: events, recorded: recorded, contextNote: contextNote,
+      capabilities: capabilities, notePrompt: notePrompt, sendLabel: sendLabel, showsTrail: showsTrail,
+      initialMedia: initialMedia, titlePrompt: titlePrompt, initialTitle: initialTitle, initialNote: note,
+      maxAttachmentDuration: maxAttachmentDuration)
   }
 
   /// Where picked items are staged before Send copies them to their

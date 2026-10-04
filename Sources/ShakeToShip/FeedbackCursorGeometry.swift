@@ -22,12 +22,12 @@ enum FeedbackCursorGeometry {
   /// Keeps the nib inside the safe area. Never behind the clock, never under the
   /// home indicator, and never so far right that the label runs off screen.
   static func clamp(
-    _ point: CGPoint, in size: CGSize, safeTop: CGFloat, safeBottom: CGFloat
+    _ point: CGPoint, in size: CGSize, safeTop: CGFloat, safeBottom: CGFloat, measured: CGSize = .zero
   ) -> CGPoint {
     let minX = leadingInset
-    let maxX = max(minX, size.width - labelReserve)
+    let maxX = max(minX, size.width - max(labelReserve, measured.width) - (measured == .zero ? 0 : leadingInset))
     let minY = safeTop + topInset
-    let maxY = max(minY, size.height - safeBottom - bottomReserve)
+    let maxY = max(minY, size.height - safeBottom - max(bottomReserve, measured.height))
     return CGPoint(
       x: min(max(point.x, minX), maxX),
       y: min(max(point.y, minY), maxY))
@@ -57,6 +57,6 @@ enum FeedbackCursorGeometry {
 enum FeedbackCursorClock {
   static func elapsed(from start: Date, to now: Date) -> String {
     let seconds = max(0, Int(now.timeIntervalSince(start)))
-    return String(format: "%01d:%02d", seconds / 60, seconds % 60)
+    return String(format: "%02d:%02d", seconds / 60, seconds % 60)
   }
 }

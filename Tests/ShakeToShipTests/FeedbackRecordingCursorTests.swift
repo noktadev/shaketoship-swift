@@ -191,11 +191,11 @@ import Testing
   @Test func elapsedFormatsMinutesAndSeconds() {
     let start = Date(timeIntervalSinceReferenceDate: 0)
     #expect(
-      FeedbackCursorClock.elapsed(from: start, to: start.addingTimeInterval(0)) == "0:00")
+      FeedbackCursorClock.elapsed(from: start, to: start.addingTimeInterval(0)) == "00:00")
     #expect(
-      FeedbackCursorClock.elapsed(from: start, to: start.addingTimeInterval(61)) == "1:01")
+      FeedbackCursorClock.elapsed(from: start, to: start.addingTimeInterval(61)) == "01:01")
     #expect(
-      FeedbackCursorClock.elapsed(from: start, to: start.addingTimeInterval(599)) == "9:59")
+      FeedbackCursorClock.elapsed(from: start, to: start.addingTimeInterval(599)) == "09:59")
   }
 
   /// A resumed session recomputes its origin from accumulated capture time, so a
@@ -203,6 +203,6 @@ import Testing
   @Test func elapsedNeverGoesNegative() {
     let start = Date(timeIntervalSinceReferenceDate: 100)
     #expect(
-      FeedbackCursorClock.elapsed(from: start, to: start.addingTimeInterval(-30)) == "0:00")
+      FeedbackCursorClock.elapsed(from: start, to: start.addingTimeInterval(-30)) == "00:00")
   }
 }

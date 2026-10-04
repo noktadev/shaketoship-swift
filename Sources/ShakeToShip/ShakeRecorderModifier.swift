@@ -156,7 +156,6 @@ struct ShakeRecorderModifier: ViewModifier {
   @State private var showConfirm = false
   @State private var hubOpenedByShake = false
   @State private var showHub = false
-  @State private var walkthroughPrompt = false
   @State private var errorMessage: String?
   /// One logical feedback session; its capture is segmented whenever the app
   /// backgrounds because ReplayKit cannot keep an in-app capture running there.
@@ -202,6 +201,7 @@ struct ShakeRecorderModifier: ViewModifier {
   /// from `Date()` at render time, which is what made the cursor's timer
   /// restart on every body evaluation of the host app. Also owns the active
   /// capture total, so the ReplayKit duration cap still excludes pauses.
+  @State private var manuallyPaused = false
   @State private var recordingClock: FeedbackRecordingClock?
   /// Monotonic time (systemUptime) of the last prompt dismissal; arms the
   /// 60s cooldown that stops a walking-with-phone nag loop.
@@ -346,6 +346,7 @@ struct ShakeRecorderModifier: ViewModifier {
         showHub = false
         await ShakeToShip.activate(config: config) { tab in
           guard !isRecording, !busy, !reviewPresenter.isPresenting else { return }
+          if tab == 4 { _ = reviewPresenter.presentIdeas(theme: cardTheme); return }
           ShakeToShip.model?.selectedTab = tab
           showHub = true
         }
@@ -361,7 +362,9 @@ struct ShakeRecorderModifier: ViewModifier {
           // offered here. Write appears alongside it whenever the composer has
           // anything to collect.
           showsWrite: composerEntryAvailable && FeedbackManualTrigger.reportRecording == nil,
-          hub: config.hubOnShake && !walkthroughPrompt ? config.hub : [],
+          writeTitle: FeedbackComposerRules.writeEntryTitle(capabilities: config.capabilities)
+            ?? FeedbackHubEntryAction.write.title,
+          hub: config.hubOnShake ? config.hub : [],
           onHub: { promptOutcome = .hub; showConfirm = false },
           onIdeas: { promptOutcome = .ideas; showConfirm = false },
           onInbox: { promptOutcome = .inbox; showConfirm = false },
@@ -378,7 +381,6 @@ struct ShakeRecorderModifier: ViewModifier {
             showConfirm = false
           }
         )
-        .onAppear { if walkthroughPrompt { promptOutcome = .pending } }
       }
       .alert(
         "Feedback error",
@@ -490,7 +492,7 @@ struct ShakeRecorderModifier: ViewModifier {
       stopHintVisible: isRecording && shakeStopHintVisible,
       onStop: { Task { await stopRecording(.user) } },
       onTogglePause: {
-        Task { recordingPaused ? await resumeRecording() : await pauseRecording() }
+        Task { recordingPaused ? await resumeRecording(manual: true) : await pauseRecording(manual: true) }
       })
   }
 
@@ -534,9 +536,11 @@ struct ShakeRecorderModifier: ViewModifier {
       case .none:
         break
       case .prompt:
-        walkthroughPrompt = recordingOnly
-        if !recordingOnly { promptsShown += 1 }
-        if !recordingOnly { promptOutcome = .pending }
+        // An explicit request comes from the tray's record control, so it starts at once.
+        // There is no second record sheet.
+        if recordingOnly { await startRecording(); return }
+        promptsShown += 1
+        promptOutcome = .pending
         showConfirm = true
         config.onFunnelEvent?(.promptShown)
       case .composer:
@@ -687,8 +691,9 @@ struct ShakeRecorderModifier: ViewModifier {
 
   /// Cleanly closes the current capture segment without ending the feedback
   /// trail or review session. A foreground lifecycle event resumes it.
-  private func pauseRecording() async {
+  private func pauseRecording(manual: Bool = false) async {
     guard !busy, isRecording, let lifecycle = recordingSession, let id = sessionId else { return }
+    manuallyPaused = manual
     busy = true
     isRecording = false
     hideShakeStopHint()
@@ -738,7 +743,9 @@ struct ShakeRecorderModifier: ViewModifier {
 
   /// Starts the next ReplayKit segment in the same logical session after the
   /// app returns. Failure falls back to the durable interrupted-session offer.
-  private func resumeRecording() async {
+  private func resumeRecording(manual: Bool = false) async {
+    guard manual || !manuallyPaused else { return }
+    if manual { manuallyPaused = false }
     guard !busy, !isRecording, let lifecycle = recordingSession, let id = sessionId else { return }
     guard await lifecycle.state == .paused else { return }
     let identityRevision = ShakeToShip.model?.revision
@@ -764,6 +771,7 @@ struct ShakeRecorderModifier: ViewModifier {
       // The resumed segment shifts the displayed origin forward by exactly the
       // paused gap, so the timer continues instead of restarting (#1393).
       recordingClock?.resume(uptime: ProcessInfo.processInfo.systemUptime, wall: Date())
+      Feedback.shared.resume()
       FeedbackTapCapture.install()
       FeedbackLiveActivityStop.register { await stopRecording(.user) }
       // #669 CHEAP SHOULD-FIX 4: carry the accumulated screen count into the
@@ -799,6 +807,7 @@ struct ShakeRecorderModifier: ViewModifier {
     reportRecording = nil
     let duration = recordingClock?.bankedDuration ?? 0
     recordingClock = nil
+    manuallyPaused = false
     FeedbackHaptics.impact()
     FeedbackLiveActivityStop.unregister()
     Feedback.shared.setActiveEventHandler(nil)
@@ -901,6 +910,7 @@ struct ShakeRecorderModifier: ViewModifier {
   /// seconds. Every pause and every stop goes through here.
   private func accumulateCaptureDuration() {
     recordingClock?.pause(uptime: ProcessInfo.processInfo.systemUptime)
+    Feedback.shared.pause()
   }
 
   private func armCaptureCap(after duration: TimeInterval) {
@@ -972,11 +982,13 @@ struct ShakeRecorderModifier: ViewModifier {
   /// One place that stamps the host's ceiling and attachment bound onto every
   /// composer, whichever entry point opened it.
   private func composerData(
-    id: String, dir: URL, events: [FeedbackEvent], recorded: URL? = nil, contextNote: String? = nil
+    id: String, dir: URL, events: [FeedbackEvent], recorded: URL? = nil, contextNote: String? = nil,
+    initialNote: String = ""
   ) -> FeedbackComposerData {
     FeedbackComposerData(
       id: id, dir: dir, events: events, recorded: recorded, contextNote: contextNote,
-      capabilities: config.capabilities, maxAttachmentDuration: config.maxAttachmentDuration)
+      capabilities: config.capabilities, initialNote: initialNote,
+      maxAttachmentDuration: config.maxAttachmentDuration)
   }
 
   /// Composer Send: write what the user composed into the session dir, then
@@ -1174,7 +1186,8 @@ struct ShakeRecorderModifier: ViewModifier {
       dir: pending.dir,
       events: events,
       recorded: pending.dir.appendingPathComponent(FeedbackAttachmentNaming.recordingFile),
-      contextNote: "Your saved recording is ready to send.")
+      contextNote: "Your saved recording is ready to send.",
+      initialNote: FeedbackRecordedNoteDraft.load(in: pending.dir))
   }
 
   /// Fixed user-facing copy for a start failure - never surfaces a raw ReplayKit

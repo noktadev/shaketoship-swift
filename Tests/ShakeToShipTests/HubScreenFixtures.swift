@@ -69,7 +69,8 @@
       let config = ShakeToShipConfig(
         app: "com.example.hub", collectorURL: URL(string: "https://fixture.invalid")!,
         secret: "fixture",
-        capabilities: [.text, .photoLibrary],
+        // The tray fixtures may record; the control appears only with a registered recorder.
+        capabilities: name.hasPrefix("hub-") ? [.text, .photoLibrary, .screenRecording] : [.text, .photoLibrary],
         hub: name == "hub-ideas-only" ? [.ideas] : [.ideas, .inbox, .prompts],
         supportURL: URL(string: "https://example.com/support"))
       let email = HubSnapshotFixtures.email(
@@ -122,7 +123,8 @@
       ShakeToShip.model = model
       let content: AnyView
       switch name {
-      case "hub-sheet", "hub-ideas-only": content = AnyView(HarnessSheet { FeedbackHubSheet() })
+      // The tray sizes its own sheet to its content.
+      case "hub-sheet", "hub-ideas-only": content = AnyView(HarnessSheet(sizesItself: true) { FeedbackHubSheet() })
       case "report":
         content = AnyView(HarnessSheet { FeedbackHubReport(model: model) })
       case "ideas", "ideas-dark":
@@ -241,13 +243,18 @@
   }
 
   struct HarnessSheet<Content: View>: View {
+    var sizesItself = false
     @ViewBuilder let content: () -> Content
     @State private var presented = false
     var body: some View {
       ShakeToShipIdeasList()
         .sheet(isPresented: $presented) {
-          content().feedbackTheme().presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
+          if sizesItself {
+            content().feedbackTheme()
+          } else {
+            content().feedbackTheme().presentationDetents([.medium, .large])
+              .presentationDragIndicator(.visible)
+          }
         }
         .task { presented = true }
     }

@@ -38,7 +38,7 @@ import Testing
 
   /// Creates all test media locally: one second of blue video and a 440 Hz tone.
   /// No bundled, downloaded, microphone, or camera content enters this fixture.
-  private func makeRecording(in directory: URL) async throws -> URL {
+  func makeRecording(in directory: URL) async throws -> URL {
     let videoURL = directory.appendingPathComponent("video.mov")
     let writer = try AVAssetWriter(outputURL: videoURL, fileType: .mov)
     let video = AVAssetWriterInput(mediaType: .video, outputSettings: [

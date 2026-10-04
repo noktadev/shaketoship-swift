@@ -31,7 +31,9 @@ final class FeedbackTrail: @unchecked Sendable {
     let build: String
     let startedAt: String
     let userRef: String?
-    let start: Double
+    var start: Double
+    var pausedAt: Double?
+    var pendingScreen: String?
     var events: [FeedbackEvent]
   }
 
@@ -50,7 +52,9 @@ final class FeedbackTrail: @unchecked Sendable {
   func screen(_ name: String) {
     lock.lock()
     var notify: Int?
-    if active != nil {
+    if active?.pausedAt != nil {
+      active?.pendingScreen = name
+    } else if active != nil {
       if active!.events.last(where: { $0.screen != nil })?.screen != name {
         let t = now() - active!.start
         active!.events.append(FeedbackEvent(t: t, screen: name))
@@ -77,11 +81,30 @@ final class FeedbackTrail: @unchecked Sendable {
   /// session's seed. `x`/`y` are already normalized (see `FeedbackTapFormatting`).
   func tap(x: Double, y: Double, element: String?) {
     lock.lock()
-    if active != nil {
+    if active != nil, active?.pausedAt == nil {
       let t = now() - active!.start
       active!.events.append(.tap(t: t, tap: FeedbackTap(x: x, y: y, element: element)))
     }
     lock.unlock()
+  }
+
+  /// The joined video omits paused time, so the event clock must omit it too.
+  func pause() {
+    lock.lock()
+    defer { lock.unlock() }
+    if active != nil, active?.pausedAt == nil { active?.pausedAt = now() }
+  }
+
+  func resume() {
+    lock.lock()
+    guard let pausedAt = active?.pausedAt else { lock.unlock(); return }
+    let resumedAt = now()
+    active!.start += max(0, resumedAt - pausedAt)
+    active!.pausedAt = nil
+    let screen = active!.pendingScreen
+    active!.pendingScreen = nil
+    lock.unlock()
+    if let screen { self.screen(screen) }
   }
 
   /// Registers a handler invoked with the current active-session event count on

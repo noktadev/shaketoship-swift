@@ -10,6 +10,20 @@ import Testing
     return { box.next() }
   }
 
+  @Test func pausedTimeAndTapsDoNotEnterTheVideoClock() {
+    let trail = FeedbackTrail(now: clock([100, 110, 140, 140, 141]))
+    trail.startSession(sessionId: "s1", app: "test", build: "1", startedAt: "T")
+    trail.pause()
+    trail.screen("Practice")
+    trail.tap(x: 0.5, y: 0.5, element: "Paused tap")
+    trail.resume()
+    trail.tap(x: 0.5, y: 0.5, element: "Unlock Pro")
+    let events = trail.stop().events
+    #expect(events == [.screen(t: 10, name: "Practice"),
+      .tap(t: 11, tap: .init(x: 0.5, y: 0.5, element: "Unlock Pro"))])
+    #expect(FeedbackTrimRange(start: 10, end: 12).events(events).count == 2)
+  }
+
   @Test func seedsFromLastBufferedScreenName() {
     let trail = FeedbackTrail(now: clock([100]))
     for i in 0..<25 { trail.screen("n\(i)") }  // idle: ring buffer

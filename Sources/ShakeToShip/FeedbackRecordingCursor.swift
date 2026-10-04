@@ -12,10 +12,8 @@
   /// battery (#1184). A small thing you can move solves both by construction -
   /// it can never cover the app, and it can never be stuck somewhere unreachable.
   ///
-  /// Shape is a FigJam-style cursor: three rounded corners and one sharp. The
-  /// sharp corner is the nib, it sits exactly on the drag point, and ink is
-  /// emitted from it - so a stroke reads as drawn BY the cursor rather than
-  /// trailing out of the middle of a label.
+  /// The capsule keeps the timer, microphone level, and Stop visible. Its
+  /// leading edge anchors the ink as the user drags it across the host.
   ///
   /// Motion budget is deliberately small. This view is composited INTO the
   /// recording, so every looping animation is re-encoded into the artifact a
@@ -26,6 +24,7 @@
     let microphoneAllowed: Bool
     let paused: Bool
     let startedAt: Date
+    var microphoneLevel: @Sendable () -> Double = { FeedbackMicrophoneLevel.shared.current }
     let onStop: () -> Void
     let onTogglePause: () -> Void
     /// The shared annotation state. The pill writes strokes here; the layer in
@@ -43,7 +42,7 @@
     @State private var dragging = false
     @State private var expanded = false
     @State private var measured: CGSize = .zero
-    @State private var pulsing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Same binding the bar used: `FeedbackMicrophonePreference.isMuted` is
     /// read-only on purpose, and `@AppStorage` keeps the toggle reactive if the
     /// host's Settings row changes it mid-recording.
@@ -52,7 +51,8 @@
     var body: some View {
       GeometryReader { geo in
         let safe = geo.safeAreaInsets
-        let point = nib ?? FeedbackCursorGeometry.home(in: geo.size)
+        let point = FeedbackCursorGeometry.clamp(nib ?? FeedbackCursorGeometry.home(in: geo.size),
+          in: geo.size, safeTop: safe.top, safeBottom: safe.bottom, measured: measured)
         let box = FeedbackCursorGeometry.hitBox(nib: point, measured: measured)
 
         ZStack(alignment: .topLeading) {
@@ -73,7 +73,7 @@
                   let moved = CGPoint(
                     x: value.location.x - grab.width, y: value.location.y - grab.height)
                   let clamped = FeedbackCursorGeometry.clamp(
-                    moved, in: geo.size, safeTop: safe.top, safeBottom: safe.bottom)
+                    moved, in: geo.size, safeTop: safe.top, safeBottom: safe.bottom, measured: measured)
                   nib = clamped
                   // The pill's window and the host window are both full-screen in
                   // the same scene, so a point is the same point in either.
@@ -85,7 +85,10 @@
                   ink.endStroke(now: Date().timeIntervalSinceReferenceDate)
                 })
             .onTapGesture(count: 2) {
-              withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { expanded.toggle() }
+              withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.82)) { expanded.toggle() }
+            }
+            .onLongPressGesture {
+              withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.82)) { expanded.toggle() }
             }
         }
         // Two consumers need the box, so it is published on first layout and
@@ -100,48 +103,48 @@
         // is how the pill hears about it.
         .onChange(of: ink.retirements) { _, _ in
           guard expanded else { return }
-          withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) { expanded = false }
+          withAnimation(reduceMotion ? nil : .spring(response: 0.26, dampingFraction: 0.86)) { expanded = false }
         }
       }
       .ignoresSafeArea()
-      .onAppear {
-        withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) { pulsing = true }
-      }
+
     }
 
     private var shape: some Shape {
-      UnevenRoundedRectangle(
-        topLeadingRadius: 1.5, bottomLeadingRadius: 14,
-        bottomTrailingRadius: 14, topTrailingRadius: 14, style: .continuous)
+      Capsule()
     }
 
     private var label: some View {
-      HStack(spacing: 7) {
-        statusDot
+      HStack(spacing: 12) {
+        microphoneMeter
         if paused {
           Text(FeedbackRecordingCopy.pausedLabel)
-            .font(.caption2.monospacedDigit()).fontWeight(.medium).foregroundStyle(.orange)
+            .font(.subheadline.monospaced()).fontWeight(.medium).foregroundStyle(recordingRed)
         } else {
           // CLOCK RULE: read the tick off `timeline.date`. A `Date()` in here is
           // a second clock and skews phase against the ink canvas.
           TimelineView(.periodic(from: startedAt, by: 1)) { timeline in
             Text(FeedbackCursorClock.elapsed(from: startedAt, to: timeline.date))
-              .font(.caption2.monospacedDigit()).fontWeight(.medium)
+              .font(.system(.title3, design: .monospaced, weight: .medium)).foregroundStyle(recordingRed)
           }
         }
+        Button(action: onStop) {
+          RoundedRectangle(cornerRadius: 5).fill(recordingRed).frame(width: 20, height: 20)
+            .frame(width: 44, height: 44)
+            .overlay(Circle().strokeBorder(recordingRed.opacity(0.45), lineWidth: 2))
+        }.buttonStyle(.plain).accessibilityLabel(FeedbackRecordingCopy.stopAction)
         if expanded {
           Divider().frame(height: 18)
           action(
-            paused ? "play.fill" : "pause.fill", .orange,
+            paused ? "play.fill" : "pause.fill", .white,
             paused ? FeedbackRecordingCopy.resumeAction : FeedbackRecordingCopy.pauseAction,
             onTogglePause)
-          action("stop.fill", .red, FeedbackRecordingCopy.stopAction, onStop)
           // The bar this replaces carried a mid-recording mute. Dropping a
           // privacy control silently is not on, so it moves here - and only
           // appears when the host actually granted `.microphone`.
           if microphoneAllowed {
             action(
-              muted ? "mic.slash.fill" : "mic.fill", .secondary,
+              muted ? "mic.slash.fill" : "mic.fill", .white,
               muted ? FeedbackRecordingCopy.unmuteAction : FeedbackRecordingCopy.muteAction
             ) {
               muted.toggle()
@@ -149,10 +152,9 @@
           }
         }
       }
-      .padding(.horizontal, 8)
-      .padding(.vertical, 5)
-      .background(.ultraThinMaterial, in: shape)
-      .overlay(shape.stroke(.red.opacity(0.35), lineWidth: 1))
+      .padding(.leading, 20).padding(.trailing, 10)
+      .padding(.vertical, 10)
+      .background(Color(white: 0.09), in: shape)
       .shadow(color: .black.opacity(0.16), radius: 7, y: 3)
       .contentShape(shape)
       .background(
@@ -166,29 +168,20 @@
         paused ? FeedbackRecordingCopy.pausedLabel : FeedbackRecordingCopy.activePrompt)
     }
 
-    private var statusDot: some View {
-      ZStack {
-        Circle()
-          .fill(.red.opacity(paused ? 0 : 0.25))
-          .frame(
-            width: FeedbackRecordingBarMetrics.haloDiameter - 7,
-            height: FeedbackRecordingBarMetrics.haloDiameter - 7)
-          .scaleEffect(pulsing && !paused ? 1 : 0.7)
-          .opacity(pulsing && !paused ? 0.35 : 0.9)
-        if paused {
-          Circle().strokeBorder(.orange, lineWidth: 2)
-            .frame(
-              width: FeedbackRecordingBarMetrics.coreDiameter - 6,
-              height: FeedbackRecordingBarMetrics.coreDiameter - 6)
-        } else {
-          Circle().fill(.red)
-            .frame(
-              width: FeedbackRecordingBarMetrics.coreDiameter - 6,
-              height: FeedbackRecordingBarMetrics.coreDiameter - 6)
-        }
-      }
-      .accessibilityHidden(true)
+    private var microphoneMeter: some View {
+      TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+        let level = microphoneAllowed && !muted && !paused ? microphoneLevel() : 0
+        HStack(spacing: 2) {
+          ForEach(0..<16) { index in
+            Capsule().fill(recordingRed.opacity(index < 10 ? 1 : 0.35))
+              .frame(width: 2, height: index < 10 ? 3 + level * Double(26 - abs(index - 4) * 4) : 3)
+          }
+        }.frame(width: 62, height: 28)
+      }.accessibilityLabel(muted || !microphoneAllowed ? "Microphone off" : "Microphone level")
     }
+
+    // Recording uses a semantic red on charcoal in every host theme.
+    private var recordingRed: Color { Color(uiColor: .systemPink) }
 
     /// Icon-only so the expansion stays one slim row. The icon is the
     /// affordance; the accessible name comes from the label, never the glyph.
@@ -199,7 +192,8 @@
         Image(systemName: icon)
           .font(.caption2)
           .foregroundStyle(tint)
-          .frame(width: 30, height: 22)
+          .frame(width: 44, height: 44)
+          .background(tint.opacity(0.12), in: Circle())
           .contentShape(Rectangle())
       }
       .buttonStyle(.plain)

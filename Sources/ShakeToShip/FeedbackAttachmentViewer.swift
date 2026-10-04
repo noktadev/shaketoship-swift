@@ -238,6 +238,8 @@ private struct FeedbackViewerVideo: View {
   let url: URL
   let isSelected: Bool
   @State private var player: AVPlayer
+  /// Full-screen review playback must be audible with the Ring/Silent switch on too.
+  @State private var audio = FeedbackPreviewAudio()
 
   init(url: URL, isSelected: Bool) {
     self.url = url
@@ -247,11 +249,11 @@ private struct FeedbackViewerVideo: View {
 
   var body: some View {
     VideoPlayer(player: player)
-      .onAppear { if isSelected { player.play() } }
+      .onAppear { if isSelected { audio.begin(); player.play() } }
       .onChange(of: isSelected) { _, selected in
-        if selected { player.play() } else { player.pause() }
+        if selected { audio.begin(); player.play() } else { player.pause(); audio.end() }
       }
-      .onDisappear { player.pause() }
+      .onDisappear { player.pause(); audio.end() }
   }
 }
 #endif

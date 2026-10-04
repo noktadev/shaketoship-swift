@@ -154,3 +154,41 @@ struct FeedbackStatusChip: View {
       .background(color.opacity(0.12), in: Capsule())
   }
 }
+
+#if canImport(UIKit)
+/// Apply the host typeface to the native navigation bar without replacing its title or controls.
+struct FeedbackNativeNavigationTheme: UIViewControllerRepresentable {
+  @Environment(\.shakeToShipTheme) private var theme
+  func makeUIViewController(context: Context) -> Controller { Controller() }
+  func updateUIViewController(_ controller: Controller, context: Context) {
+    controller.theme = theme
+    controller.apply()
+  }
+  final class Controller: UIViewController {
+    var theme = ShakeToShipTheme()
+    override func viewDidLoad() { super.viewDidLoad(); view.isUserInteractionEnabled = false }
+    override func viewDidAppear(_ animated: Bool) { super.viewDidAppear(animated); apply() }
+    func apply() {
+      guard let bar = navigationController?.navigationBar, let design = theme.fontDesign else { return }
+      let fontDesign: UIFontDescriptor.SystemDesign = design == .serif ? .serif : design == .rounded ? .rounded : design == .monospaced ? .monospaced : .default
+      func font(_ style: UIFont.TextStyle) -> UIFont {
+        let base = UIFont.preferredFont(forTextStyle: style)
+        return UIFont(descriptor: base.fontDescriptor.withDesign(fontDesign) ?? base.fontDescriptor, size: base.pointSize)
+      }
+      for appearance in [bar.standardAppearance, bar.scrollEdgeAppearance, bar.compactAppearance].compactMap({ $0 }) {
+        appearance.titleTextAttributes[.font] = font(.headline)
+        appearance.largeTitleTextAttributes[.font] = font(.largeTitle).withTraits(.traitBold)
+        if let color = theme.primaryText {
+          appearance.titleTextAttributes[.foregroundColor] = UIColor(color)
+          appearance.largeTitleTextAttributes[.foregroundColor] = UIColor(color)
+        }
+      }
+    }
+  }
+}
+private extension UIFont {
+  func withTraits(_ traits: UIFontDescriptor.SymbolicTraits) -> UIFont {
+    UIFont(descriptor: fontDescriptor.withSymbolicTraits(traits) ?? fontDescriptor, size: pointSize)
+  }
+}
+#endif

@@ -5,6 +5,19 @@ import Observation
 
 @MainActor
 @Suite struct FeedbackManualTriggerTests {
+  /// The tray's record control is the whole request: each tap reaches the recorder once,
+  /// and nothing asks a second time.
+  @Test func eachRecordRequestReachesTheRecorderOnce() {
+    var shakes = 0
+    var recordings = 0
+    FeedbackManualTrigger.register({ shakes += 1 }, recording: { recordings += 1 })
+    defer { FeedbackManualTrigger.unregister() }
+    FeedbackManualTrigger.signalRecording()
+    FeedbackManualTrigger.signalRecording()
+    #expect(recordings == 2)
+    #expect(shakes == 0)
+  }
+
   @Test func availabilityNotifiesMountedObservers() async {
     FeedbackManualTrigger.unregister()
     await confirmation("recording availability changes") { changed in

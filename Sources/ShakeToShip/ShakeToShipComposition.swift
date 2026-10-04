@@ -21,6 +21,24 @@ public enum ShakeToShipRoute: Hashable {
       FeedbackHubSurface(option: .ideas) { FeedbackIdeasView(model: $0) }
     }
   }
+  /// Mount as a tab root, push destination, or full-screen presentation.
+  /// Supply `dismiss` only for a presentation that needs a Close button.
+  public struct ShakeToShipIdeasScreen: View {
+    private let dismiss: (() -> Void)?
+    public init(dismiss: (() -> Void)? = nil) { self.dismiss = dismiss }
+    public var body: some View {
+      NavigationStack {
+        FeedbackHubSurface(option: .ideas) { FeedbackIdeasBoard(model: $0) }
+          .navigationTitle("Ideas").navigationBarTitleDisplayMode(.large)
+          .shakeToShipDestinations()
+          .toolbar {
+            if let dismiss {
+              ToolbarItem(placement: .cancellationAction) { Button("Close", action: dismiss) }
+            }
+          }
+      }.feedbackTheme()
+    }
+  }
   public struct ShakeToShipIdeaDetail: View {
     public let id: String
     public init(id: String) { self.id = id }
@@ -160,11 +178,13 @@ public enum ShakeToShipRoute: Hashable {
   }
 
   /// The convenience entry owns one stack; routes push within the same sheet.
+  /// A shake lands on the same tray as `presentHub()`: with hub options it is the hub tray,
+  /// and without them the tray keeps only the record control and Write it instead.
   struct FeedbackPromptSheet: View {
-    /// Whether the composer can collect anything on this host (a note or an
-    /// attachment). False leaves the sheet exactly as it was before the composer
-    /// existed: Record, or not now.
+    /// Whether the composer can collect anything on this host (a note or an attachment).
     let showsWrite: Bool
+    /// Names what the composer collects; see `FeedbackComposerRules.writeEntryTitle`.
+    var writeTitle = FeedbackHubEntryAction.write.title
     let hub: HubOptions
     let onHub: () -> Void
     let onIdeas: () -> Void
@@ -172,31 +192,55 @@ public enum ShakeToShipRoute: Hashable {
     let onRecord: () -> Void
     let onWrite: () -> Void
     let onDismiss: () -> Void
+    @State private var height: CGFloat = 0
+    @Environment(\.shakeToShipTheme) private var theme
 
     var body: some View {
       if hub.isEmpty {
-        FeedbackRecordingConsentCard(showsWrite: showsWrite, onRecord: onRecord,
-          onWrite: onWrite, onDismiss: onDismiss)
+        ScrollView {
+          FeedbackEntryTray(recordAvailable: FeedbackManualTrigger.isRecordingAvailable, onRecord: onRecord,
+            rows: showsWrite ? [.action(.write, title: writeTitle, perform: onWrite)] : [],
+            onHeight: { height = $0 })
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .feedbackTheme().background(FeedbackSDKPresentationMarker())
+        .feedbackTrayPresentation(contentHeight: height)
+        .presentationBackground(theme.background ?? Color(uiColor: .systemBackground))
       } else {
         FeedbackHubSheet()
       }
     }
   }
 
-  struct FeedbackRecordingConsentCard: View {
-    let showsWrite: Bool
-    let onRecord: () -> Void
-    let onWrite: () -> Void
-    let onDismiss: () -> Void
+  /// `presentReport()` and Inbox's new-ticket action open the report-scoped tray: the record
+  /// control and Write it instead. An existing draft, or a host that cannot record, opens the form.
+  struct FeedbackBugReport: View {
+    let model: FeedbackHubModel
+    var screenshot: Data? = nil
+    @State private var writing = false
+    @State private var height: CGFloat = 0
+    @Environment(\.shakeToShipTheme) private var theme
+    private var recordAvailable: Bool {
+      FeedbackComposerRules.showsRecordAction(
+        capabilities: model.config.capabilities, recordingAvailable: FeedbackManualTrigger.isRecordingAvailable)
+    }
     var body: some View {
-      ScrollView {
-        FeedbackCard(symbol: "record.circle", title: "Report a bug",
-          message: FeedbackRecordingCopy.promptExplanation) {
-          FeedbackCardAction(title: "Record & report", action: onRecord)
-          if showsWrite { Button("Write instead", action: onWrite).frame(minHeight: 44) }
-          Button("Not now", action: onDismiss).buttonStyle(.plain).frame(minHeight: 44)
+      if writing || !recordAvailable || (try? model.draftStore.load()) != nil {
+        FeedbackHubReport(model: model, screenshot: screenshot)
+      } else {
+        ScrollView {
+          FeedbackEntryTray(recordAvailable: true,
+            onRecord: { FeedbackSDKPresentationMarker.requestWalkthrough() },
+            rows: FeedbackComposerRules.writeEntryTitle(capabilities: model.config.capabilities).map {
+              [.action(.write, title: $0) { writing = true }]
+            } ?? [],
+            onHeight: { height = $0 })
         }
-      }.feedbackCardPresentation()
+        .scrollBounceBehavior(.basedOnSize)
+        .feedbackTheme().background(FeedbackSDKPresentationMarker())
+        .feedbackTrayPresentation(contentHeight: height)
+        .presentationBackground(theme.background ?? Color(uiColor: .systemBackground))
+      }
     }
   }
 
@@ -206,64 +250,48 @@ public enum ShakeToShipRoute: Hashable {
     var screenshot: Data? = nil
     var body: some View {
       FeedbackHubSurface { model in
-        if initialReport { FeedbackHubReport(model: model, screenshot: screenshot) }
+        if initialReport { FeedbackBugReport(model: model, screenshot: screenshot) }
         else { FeedbackHubEntryCard(model: model, path: initialRoute.map { [$0] } ?? []) }
       }
     }
   }
 
+  /// The first feedback tray: the record control, then compact rows for the enabled options.
   struct FeedbackHubEntryCard: View {
     @Bindable var model: FeedbackHubModel
     @State var path: [ShakeToShipRoute] = []
     @State private var report: FeedbackReportPresentation?
     @State private var suggest = false
     @State private var email = false
-    @State private var entryHeights: [String: CGFloat] = [:]
+    @State private var height: CGFloat = 0
     @Environment(\.shakeToShipTheme) private var theme
-    private var entryTitles: [String] {
-      ["Report a bug"]
-        + (model.config.hub.contains(.ideas) ? ["Suggest an idea", "Ideas"] : [])
-        + (model.config.hub.contains(.inbox) ? ["Inbox"] : [])
+    private var actions: [FeedbackHubEntryAction] {
+      FeedbackComposerRules.hubEntryActions(capabilities: model.config.capabilities,
+        recordingAvailable: FeedbackManualTrigger.isRecordingAvailable, hub: model.config.hub)
+    }
+    private var rows: [FeedbackTrayRow] {
+      var rows: [FeedbackTrayRow] = actions.compactMap { action in
+        switch action {
+        case .record: nil
+        case .write, .report: .action(action) { openReport() }
+        case .suggest: .action(action) { suggest = true }
+        case .ideas: .route(action, .ideas)
+        case .inbox: .route(action, .inbox)
+        }
+      }
+      if !model.config.hub.contains(.inbox) {
+        rows.append(.init(title: "Email updates", symbol: "envelope", kind: .action { email = true }))
+      }
+      return rows
     }
     var body: some View {
       NavigationStack(path: $path) {
         ScrollView {
-          FeedbackCard(symbol: "bubble.left", title: "Any feedback to share?",
-            message: "Report a problem, share an idea, or see what's new.") {
-            if model.config.capabilities.contains(.screenRecording), FeedbackManualTrigger.isRecordingAvailable { FeedbackWalkthroughButton() }
-            List {
-              Section {
-                Button {
-                  report = FeedbackReportPresentation(screenshot: FeedbackReportScreenshot.captureForReport(model: model))
-                } label: { entry("Report a bug", "ladybug", showsChevron: true) }
-                .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                if model.config.hub.contains(.ideas) {
-                  Button { suggest = true } label: { entry("Suggest an idea", "lightbulb", showsChevron: true) }
-                    .buttonStyle(.plain)
-                    .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                  NavigationLink(value: ShakeToShipRoute.ideas) { entry("Ideas", "arrow.up.square") }
-                    .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                }
-                if model.config.hub.contains(.inbox) {
-                  NavigationLink(value: ShakeToShipRoute.inbox) { entry("Inbox", "tray") }
-                    .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                }
-              }
-              .listRowBackground(theme.surface ?? Color(uiColor: .secondarySystemGroupedBackground))
-            }
-            .listStyle(.insetGrouped).scrollDisabled(true)
-            .environment(\.defaultMinListRowHeight, 44)
-            .scrollContentBackground(.hidden).contentMargins(.vertical, 0, for: .scrollContent)
-            .frame(height: entryTitles.reduce(0) { $0 + (entryHeights[$1] ?? 48) })
-            // The native section supplies its own inset outside the card's content padding.
-            .padding(.horizontal, -20)
-            FeedbackRecordingDeviceHint()
-            if !model.config.hub.contains(.inbox) {
-              Button("Email updates", systemImage: "envelope") { email = true }
-            }
-          }
+          FeedbackEntryTray(recordAvailable: actions.contains(.record),
+            onRecord: { FeedbackSDKPresentationMarker.requestWalkthrough() }, rows: rows,
+            onHeight: { height = $0 })
         }
+        .scrollBounceBehavior(.basedOnSize)
         .navigationTitle("Feedback").toolbar(.hidden, for: .navigationBar)
         .navigationDestination(for: ShakeToShipRoute.self) { route in
           Group {
@@ -277,28 +305,12 @@ public enum ShakeToShipRoute: Hashable {
         .sheet(item: $report) { report in FeedbackHubReport(model: model, screenshot: report.screenshot) }
         .sheet(isPresented: $suggest) { FeedbackSuggestView(model: model) }
         .sheet(isPresented: $email) { FeedbackEmailSheet(model: model) }
-
       }.background(FeedbackSDKPresentationMarker())
-        .feedbackTheme().feedbackCardPresentation(detents: [.medium, .large])
+        .feedbackTheme().feedbackTrayPresentation(contentHeight: height, pushed: !path.isEmpty)
         .presentationBackground(theme.background ?? Color(uiColor: .systemGroupedBackground))
     }
-    private func entry(_ title: String, _ symbol: String, showsChevron: Bool = false) -> some View {
-      HStack(spacing: 12) {
-        Image(systemName: symbol).foregroundStyle(.tint).frame(width: 28)
-          .accessibilityHidden(true)
-        Text(title).foregroundStyle(theme.primaryText ?? .primary).lineLimit(1).truncationMode(.tail)
-        Spacer(minLength: 0)
-        if showsChevron {
-          Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-            .foregroundStyle(.tertiary).accessibilityHidden(true)
-        }
-      }
-      .feedbackFont(.body, inherit: false).frame(minHeight: 24)
-      .contentShape(Rectangle())
-      .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + 40 }
-      .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-        entryHeights[title] = max(44, height + 24)
-      }
+    private func openReport() {
+      report = FeedbackReportPresentation(screenshot: FeedbackReportScreenshot.captureForReport(model: model))
     }
   }
   struct FeedbackVoteButton: View {

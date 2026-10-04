@@ -12,8 +12,16 @@ import SwiftUI
     var body: some View {
       List {
         Section {
+          let actions = FeedbackComposerRules.hubEntryActions(capabilities: model.config.capabilities,
+            recordingAvailable: FeedbackManualTrigger.isRecordingAvailable, hub: model.config.hub)
+          if actions.contains(.record) {
+            Button { FeedbackSDKPresentationMarker.requestWalkthrough() } label: {
+              FeedbackEntryLabel(title: FeedbackHubEntryAction.record.title, systemImage: "record.circle")
+            }.accessibilityIdentifier("ShakeToShip.recordWalkthrough")
+          }
           Button { report = FeedbackReportPresentation(screenshot: FeedbackReportScreenshot.captureForReport(model: model)) } label: {
-            FeedbackEntryLabel(title: "Report a bug", systemImage: "ladybug")
+            FeedbackEntryLabel(title: actions.contains(.write) ? FeedbackHubEntryAction.write.title
+              : FeedbackHubEntryAction.report.title, systemImage: actions.contains(.write) ? "square.and.pencil" : "ladybug")
           }
           if model.config.hub.contains(.ideas) {
             Button { suggest = true } label: {
@@ -547,7 +555,7 @@ import SwiftUI
         }.feedbackRow()
       }.feedbackListStyle()
         .sheet(isPresented: $email) { FeedbackEmailSheet(model: model) }
-        .sheet(item: $report) { report in FeedbackHubReport(model: model, screenshot: report.screenshot) }
+        .sheet(item: $report) { report in FeedbackBugReport(model: model, screenshot: report.screenshot) }
         .refreshable { await model.refreshInbox() }.task {
           await model.refreshInbox()
         }

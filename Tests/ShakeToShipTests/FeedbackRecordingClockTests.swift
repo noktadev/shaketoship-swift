@@ -42,7 +42,7 @@ import Testing
   @Test func aMinuteAndAHalfOfRecordingReadsAsAMinuteAndAHalf() {
     let clock = clock()
     let now = start.addingTimeInterval(92)
-    #expect(FeedbackCursorClock.elapsed(from: clock.origin, to: now) == "1:32")
+    #expect(FeedbackCursorClock.elapsed(from: clock.origin, to: now) == "01:32")
   }
 
   @Test func activeDurationCountsTheOpenSegment() {
@@ -72,7 +72,7 @@ import Testing
     #expect(clock.activeDuration(uptime: bootUptime + 110) == 40)
     // 30s were captured before the pause, so at wall t=110 the readout is 0:40.
     #expect(
-      FeedbackCursorClock.elapsed(from: clock.origin, to: start.addingTimeInterval(110)) == "0:40")
+      FeedbackCursorClock.elapsed(from: clock.origin, to: start.addingTimeInterval(110)) == "00:40")
   }
 
   /// The origin survives a pause/resume as a single stable value, so the resumed

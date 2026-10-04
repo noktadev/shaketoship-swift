@@ -372,6 +372,11 @@ public enum ShakeToShip {
     #endif
     present?(3)
   }
+  /// Presents Ideas over the mounted host window in a full-screen window.
+  public static func presentIdeas() {
+    guard let model, model.active, model.config.hub.contains(.ideas) else { return }
+    present?(4)
+  }
   public static func resetIdentity() async throws {
     guard let model else {
       try FeedbackHubStorage.clearAllLocalIdentities()

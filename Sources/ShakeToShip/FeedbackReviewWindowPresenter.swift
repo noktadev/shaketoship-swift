@@ -11,6 +11,7 @@ import UIKit
 @MainActor
 final class FeedbackReviewWindowPresenter {
   private var window: UIWindow?
+  private var recordingEditor: FeedbackRecordingEditor?
   // Held so `dismiss()` can unregister them. NOT touched from `deinit`: a
   // nonisolated deinit cannot access this MainActor-isolated property under
   // Swift 6 strict concurrency. Cleanup happens in `dismiss()`, which the
@@ -44,10 +45,13 @@ final class FeedbackReviewWindowPresenter {
     // `reviewSession = nil` first line).
     let hostWindow = scene.windows.first(where: { $0.isKeyWindow })
     window.tintColor = hostWindow?.tintColor
+    window.overrideUserInterfaceStyle = hostWindow?.traitCollection.userInterfaceStyle ?? .unspecified
     window.traitOverrides.preferredContentSizeCategory = hostWindow?.traitCollection.preferredContentSizeCategory ?? .large
+    let editor = FeedbackRecordingEditor()
+    recordingEditor = editor
     let controller = UIHostingController(
       rootView: FeedbackReviewPresentation(
-        data: data,
+        data: data, editor: editor,
         onSend: { [weak self] result in
           self?.dismiss()
           onSend(result)
@@ -61,7 +65,14 @@ final class FeedbackReviewWindowPresenter {
             self?.dismiss()
             optOut()
           }
-        }, onClose: { [weak self] in self?.dismiss() }).shakeToShipTheme(theme))
+        },
+        // The card defers onClose past its sheet update. By then a decision may have
+        // dismissed this window and a replacement review may own the presenter, so
+        // close only the window this presentation created.
+        onClose: { [weak self, weak window] in
+          guard let self, let window, self.window === window else { return }
+          self.dismiss()
+        }).shakeToShipTheme(theme))
     if data.recorded != nil {
       controller.view.backgroundColor = .clear
       window.backgroundColor = .clear
@@ -82,6 +93,27 @@ final class FeedbackReviewWindowPresenter {
           MainActor.assumeIsolated { self?.dismiss() }
         })
     }
+    return true
+  }
+
+  /// A separate host window keeps the recorder mounted while Ideas owns the full display.
+  func presentIdeas(theme: ShakeToShipTheme = .init()) -> Bool {
+    guard window == nil,
+      let scene = ShakeToShip.hostWindow?.windowScene ?? UIApplication.shared.connectedScenes
+        .compactMap({ $0 as? UIWindowScene }).first(where: { $0.activationState == .foregroundActive }) else { return false }
+    let window = UIWindow(windowScene: scene)
+    window.windowLevel = .alert + 1
+    window.tintColor = ShakeToShip.hostWindow?.tintColor
+    window.overrideUserInterfaceStyle = ShakeToShip.hostWindow?.traitCollection.userInterfaceStyle ?? .unspecified
+    window.traitOverrides.preferredContentSizeCategory = ShakeToShip.hostWindow?.traitCollection.preferredContentSizeCategory ?? .large
+    window.rootViewController = UIHostingController(rootView:
+      ShakeToShipIdeasScreen(dismiss: { [weak self] in self?.dismiss() }).shakeToShipTheme(theme))
+    self.window = window
+    window.isHidden = false
+    teardownObservers.append(NotificationCenter.default.addObserver(
+      forName: UIScene.didDisconnectNotification, object: scene, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.dismiss() }
+      })
     return true
   }
 
@@ -110,6 +142,9 @@ final class FeedbackReviewWindowPresenter {
   }
 
   func dismiss() {
+    // Only the window owner ends review. Attachment sheets and previews retain this editor.
+    recordingEditor?.stop()
+    recordingEditor = nil
     for observer in teardownObservers { NotificationCenter.default.removeObserver(observer) }
     teardownObservers.removeAll()
     window?.isHidden = true

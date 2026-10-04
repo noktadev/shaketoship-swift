@@ -437,6 +437,7 @@ private final class WriterSink: @unchecked Sendable {
       // was never armed - `audioInput` stays nil for the rest of this
       // recording, so it takes effect only from the next one. That asymmetry
       // is the privacy-safe direction: silence can start late, never end late.
+      FeedbackMicrophoneLevel.shared.update(sample, muted: muted || audioInput == nil)
       guard let audioInput, !muted else { return }
       if audioInput.isReadyForMoreMediaData { audioInput.append(sample) }
     default:

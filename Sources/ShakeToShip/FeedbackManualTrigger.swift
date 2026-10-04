@@ -45,7 +45,8 @@ public enum FeedbackManualTrigger {
 
   /// Called by the manual entry point (e.g. a Settings row). No-op when
   /// nothing is mounted (recorder inert - App Store, or gate off).
-  /// Explicit walkthrough entry still uses the modifier's gate and recording consent.
+  /// An explicit record request starts recording through the modifier's gate. The host's
+  /// first-enable consent (`onRecordingRequestedWhileGated`) still runs first.
   static func prepareRecording() { recordingPreparation?() }
   public static func signalRecording() {
     guard recordingHandler != nil, recordingGate?() != true else { return }

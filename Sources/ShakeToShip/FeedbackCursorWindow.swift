@@ -129,6 +129,7 @@ enum FeedbackPassThroughHit {
           window.windowLevel = .alert
           window.backgroundColor = .clear
           window.isOpaque = false
+          window.tintColor = hostWindow?.tintColor
           ownerScene = scene
         }
 
