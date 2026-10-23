@@ -48,7 +48,7 @@ import SwiftUI
       }
       .feedbackListStyle()
       .sheet(item: $report) { report in
-        FeedbackHubReport(model: model, screenshot: report.screenshot).presentationDetents([.medium, .large])
+        FeedbackHubReport(model: model, screenshot: report.screenshot)
       }
       .sheet(isPresented: $suggest) { FeedbackSuggestView(model: model) }
       .sheet(isPresented: $email) { FeedbackEmailSheet(model: model) }

@@ -47,6 +47,17 @@ struct FeedbackReportDraftStore: Sendable {
         outboxRoot.resolvingSymlinksInPath().standardizedFileURL
   }
 
+  /// A confirmed legacy upload can finish before its draft pointer is removed.
+  /// Remove only the stale pointer, never an unowned directory.
+  func clearMissingDirectoryRecord() throws {
+    guard let draft = try storage.read(FeedbackReportDraft.self, file: Self.file),
+      !FileManager.default.fileExists(atPath: draft.directory.path) else { return }
+    guard draft.generation == generation, UUID(uuidString: draft.id) != nil,
+      draft.directory.lastPathComponent == draft.id, ownsDirectory(draft.directory) else {
+      throw FeedbackHubError.identityChanged
+    }
+    try FileManager.default.removeItem(at: storage.root.appendingPathComponent(Self.file))
+  }
   func load() throws -> FeedbackReportDraft? {
     guard let draft = try storage.read(FeedbackReportDraft.self, file: Self.file) else { return nil }
     try validate(draft)
@@ -69,7 +80,7 @@ struct FeedbackReportDraftStore: Sendable {
     guard draft.generation == generation, UUID(uuidString: draft.id) != nil,
       draft.directory.lastPathComponent == draft.id, ownsDirectory(draft.directory),
       let binding = try FeedbackCaptureBinding.read(in: draft.directory),
-      binding.scope == storage.scope, binding.generation == generation, binding.purpose == .report,
+      binding.scope == storage.scope, binding.generation == generation, ([FeedbackCapturePurpose.report, .feedback].contains(binding.purpose)),
       draft.captureID.map({ UUID(uuidString: $0) != nil }) ?? true else {
       throw FeedbackHubError.identityChanged
     }
@@ -144,7 +155,7 @@ final class FeedbackReportRecording {
     guard store.ownsDirectory(directory), var draft = try store.load(), draft.id == draftID,
       draft.media.count < FeedbackAttachmentBounds.maxItems,
       let binding = try FeedbackCaptureBinding.read(in: directory),
-      binding.scope == store.storage.scope, binding.generation == store.generation, binding.purpose == .report else {
+      binding.scope == store.storage.scope, binding.generation == store.generation, ([FeedbackCapturePurpose.report, .feedback].contains(binding.purpose)) else {
       throw FeedbackHubError.storage
     }
     guard draft.captureID == nil else { throw FeedbackHubError.storage }
@@ -158,7 +169,7 @@ final class FeedbackReportRecording {
     guard store.ownsDirectory(directory), var draft = try store.load(), draft.id == draftID,
       draft.captureID == directory.lastPathComponent,
       let binding = try FeedbackCaptureBinding.read(in: directory),
-      binding.scope == store.storage.scope, binding.generation == store.generation, binding.purpose == .report else {
+      binding.scope == store.storage.scope, binding.generation == store.generation, ([FeedbackCapturePurpose.report, .feedback].contains(binding.purpose)) else {
       throw FeedbackHubError.identityChanged
     }
     let names = session.segments?.map(\.file) ?? ["recording.mov"]

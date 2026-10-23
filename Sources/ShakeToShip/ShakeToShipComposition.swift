@@ -367,6 +367,7 @@ public enum ShakeToShipRoute: Hashable {
 struct FeedbackSheet<Content: View, Action: View>: View {
   let title: String
   var cancelDisabled = false
+  var detents: Set<PresentationDetent> = [.medium, .large]
   @State var path: [ShakeToShipRoute] = []
   @ViewBuilder let content: () -> Content
   @ViewBuilder let action: () -> Action
@@ -387,7 +388,7 @@ struct FeedbackSheet<Content: View, Action: View>: View {
         }
     }
     .feedbackTheme().feedbackBackground()
-    .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+    .presentationDetents(detents).presentationDragIndicator(.visible)
   }
 }
 

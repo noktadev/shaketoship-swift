@@ -18,6 +18,10 @@
     @State private var actionReset = UUID()
     @State private var resultIcon = "checkmark.bubble"
     var body: some View {
+      if isIdea { legacyBody }
+      else { FeedbackLiveConversation(model: model, screenshot: screenshot) }
+    }
+    private var legacyBody: some View {
       FeedbackSheet(title: isIdea ? "Tell us more" : "Report a bug") {
         if let data {
           FeedbackComposer(

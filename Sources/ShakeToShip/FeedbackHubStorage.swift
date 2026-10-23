@@ -70,7 +70,8 @@ struct FeedbackHubStorage: Sendable {
     let outbox = FeedbackReportDraftStore.defaultOutboxRoot
     for directory in (try? FileManager.default.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil)) ?? [] {
       guard UUID(uuidString: directory.lastPathComponent) != nil,
-        FileManager.default.fileExists(atPath: directory.appendingPathComponent(FeedbackReportDraftStore.marker).path),
+        (FileManager.default.fileExists(atPath: directory.appendingPathComponent(FeedbackReportDraftStore.marker).path) ||
+          FileManager.default.fileExists(atPath: directory.appendingPathComponent(FeedbackConversationRecord.pendingMarker).path)),
         (try? FeedbackCaptureBinding.read(in: directory)) != nil else { continue }
       try FileManager.default.removeItem(at: directory)
     }
@@ -105,7 +106,8 @@ struct FeedbackHubStorage: Sendable {
     let outbox = FeedbackReportDraftStore.defaultOutboxRoot
     for directory in (try? FileManager.default.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil)) ?? [] {
       guard UUID(uuidString: directory.lastPathComponent) != nil,
-        FileManager.default.fileExists(atPath: directory.appendingPathComponent(FeedbackReportDraftStore.marker).path),
+        (FileManager.default.fileExists(atPath: directory.appendingPathComponent(FeedbackReportDraftStore.marker).path) ||
+          FileManager.default.fileExists(atPath: directory.appendingPathComponent(FeedbackConversationRecord.pendingMarker).path)),
         let binding = try? FeedbackCaptureBinding.read(in: directory), binding.scope == scope else { continue }
       try FileManager.default.removeItem(at: directory)
     }
@@ -130,6 +132,7 @@ struct FeedbackCapturePurpose: Codable, Sendable, Equatable {
   let kind: String
   let ideaId: String?
   static let report = Self(kind: "report", ideaId: nil)
+  static let feedback = Self(kind: "feedback", ideaId: nil)
   static func idea(_ id: String) -> Self { Self(kind: "idea", ideaId: id) }
 }
 struct FeedbackOwnedSession: Codable, Sendable, Identifiable, Equatable {
