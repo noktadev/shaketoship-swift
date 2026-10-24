@@ -4,6 +4,20 @@ import Testing
 @testable import ShakeToShip
 
 struct FeedbackHubTests {
+  @Test func supportOnlyHostKeepsActivationGatesAndDoesNotEnableOtherFeatures() {
+    let config = ShakeToShipConfig(app: "test", collectorURL: URL(string: "https://test.invalid")!,
+      secret: "secret", capabilities: [.text], hub: [.support])
+    #expect(FeedbackGate.shouldAttachHub(config: config, recorderActive: true))
+    #expect(!FeedbackGate.shouldAttachHub(config: config, recorderActive: false))
+    #expect(!config.hub.contains(.ideas))
+    #expect(!config.hub.contains(.inbox))
+    #expect(!config.hub.contains(.prompts))
+    #expect(config.with(onFunnelEvent: nil, onOptOut: nil).hub == [.support])
+    let disabled = ShakeToShipConfig(app: "test", collectorURL: config.collectorURL,
+      secret: "secret", capabilities: [], hub: [.support])
+    #expect(!FeedbackGate.shouldAttachHub(config: disabled, recorderActive: true))
+  }
+
   @Test func hubRequiresBothGates() {
     let disabled = ShakeToShipConfig(
       app: "test", collectorURL: URL(string: "https://test.invalid")!, secret: "secret")

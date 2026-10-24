@@ -198,6 +198,10 @@ public struct HubOptions: OptionSet, Sendable {
   public static let ideas = HubOptions(rawValue: 1 << 0)
   public static let inbox = HubOptions(rawValue: 1 << 1)
   public static let prompts = HubOptions(rawValue: 1 << 2)
+  /// Open private Support chat first on shake, manual feedback, and report entry.
+  /// Requires the conversation API and migrations before host rollout.
+  /// Ideas and Inbox remain available through their explicit routes.
+  public static let support = HubOptions(rawValue: 1 << 3)
 }
 
 public enum Contact: Sendable, Equatable {

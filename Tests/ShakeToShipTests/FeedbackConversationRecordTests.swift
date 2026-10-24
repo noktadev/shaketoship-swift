@@ -25,11 +25,13 @@ struct FeedbackConversationRecordTests {
     #expect(try await client.conversationTurn(record) == snapshot)
     let requests = await transport.requests.filter { $0.url?.path == "/v2/conversations" }
     #expect(requests.count == 2)
+    // JSON object key order is unspecified; retries must preserve every field.
     let firstBody = try #require(requests[0].httpBody)
     let retryBody = try #require(requests[1].httpBody)
     let firstPayload = try #require(JSONSerialization.jsonObject(with: firstBody) as? NSDictionary)
     let retryPayload = try #require(JSONSerialization.jsonObject(with: retryBody) as? NSDictionary)
     #expect(firstPayload == retryPayload)
+    #expect(firstPayload["messageId"] as? String == id)
     #expect(requests[0].value(forHTTPHeaderField: "x-reporter-token") != nil)
   }
   @Test func identityResetErasesPrivateTranscriptAndRejectsLateSave() async throws {

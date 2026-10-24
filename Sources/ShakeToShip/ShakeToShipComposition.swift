@@ -212,8 +212,8 @@ public enum ShakeToShipRoute: Hashable {
     }
   }
 
-  /// `presentReport()` and Inbox's new-ticket action open the report-scoped tray: the record
-  /// control and Write it instead. An existing draft, or a host that cannot record, opens the form.
+  /// Support hosts open chat directly. Other hosts retain the report-scoped recording tray.
+  /// An existing draft or unavailable recorder also opens the conversation directly.
   struct FeedbackBugReport: View {
     let model: FeedbackHubModel
     var screenshot: Data? = nil
@@ -225,7 +225,7 @@ public enum ShakeToShipRoute: Hashable {
         capabilities: model.config.capabilities, recordingAvailable: FeedbackManualTrigger.isRecordingAvailable)
     }
     var body: some View {
-      if writing || !recordAvailable || (try? model.draftStore.load()) != nil {
+      if model.config.hub.contains(.support) || writing || !recordAvailable || (try? model.draftStore.load()) != nil {
         FeedbackHubReport(model: model, screenshot: screenshot)
       } else {
         ScrollView {
@@ -250,7 +250,9 @@ public enum ShakeToShipRoute: Hashable {
     var screenshot: Data? = nil
     var body: some View {
       FeedbackHubSurface { model in
-        if initialReport { FeedbackBugReport(model: model, screenshot: screenshot) }
+        if initialReport || (initialRoute == nil && model.config.hub.contains(.support)) {
+          FeedbackBugReport(model: model, screenshot: screenshot)
+        }
         else { FeedbackHubEntryCard(model: model, path: initialRoute.map { [$0] } ?? []) }
       }
     }
