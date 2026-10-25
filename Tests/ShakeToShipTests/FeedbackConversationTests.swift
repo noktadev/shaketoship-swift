@@ -3,6 +3,17 @@ import Testing
 @testable import ShakeToShip
 
 @Suite struct FeedbackConversationTests {
+  @Test func pendingDeliveryKeepsNextDraftButPreventsOverlappingSendAndRecording() {
+    var input = FeedbackConversationInput(text: "Next message", deliveryPending: true,
+      capabilities: .all, recordingAvailable: true)
+    #expect(!input.canSend)
+    #expect(!input.canRecord)
+    input.text += " with more detail"
+    input.deliveryPending = false
+    #expect(input.canSend)
+    #expect(input.canRecord)
+    #expect(input.text == "Next message with more detail")
+  }
   @Test func textCapabilityCannotBeBypassedByAStaleDraft() {
     var input = FeedbackConversationInput(text: "Saved before capabilities changed", capabilities: [.screenRecording])
     #expect(!input.canSend)

@@ -65,9 +65,12 @@ struct FeedbackLiveConversation: View {
             Button("Discard recording", role: .destructive) { discardCapture() }
           }.padding().disabled(busy || preparing)
         }
-        if let draft, record?.pending == nil {
+        if let draft {
           FeedbackReportConversation(messages: messages, data: draft, actionReset: reset,
             sending: busy, error: error,
+            deliveryPending: record?.pending != nil,
+            screenshot: omitScreenshot ? nil : screenshot,
+            onRetry: { _ in operation = Task { await resume() } },
             onSave: { try saveDraft($0, id: draft.id) },
             onSend: { value in operation = Task { await submit(draft, value) } },
             onRecord: { value in
@@ -76,7 +79,6 @@ struct FeedbackLiveConversation: View {
               FeedbackManualTrigger.reportRecording = FeedbackReportRecording(store: model.draftStore, draftID: draft.id)
               FeedbackSDKPresentationMarker.requestWalkthrough()
             }, onDiscard: { discard(draft) }, onOptOut: model.config.onOptOut)
-            .id(draft.id + draft.initialMedia.map { $0.id.absoluteString }.joined())
         } else {
           FeedbackConversationView(messages: messages, input: .constant(FeedbackConversationInput(isSending: busy, capabilities: [])), error: error, showsComposer: false,
             onSend: {}, onRecord: {}, onAttach: {}, onRetry: { _ in operation = Task { await resume() } }, onRemove: { _ in })
@@ -170,8 +172,8 @@ struct FeedbackLiveConversation: View {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         do { try await model.client.bindCapture(in: dir, purpose: .feedback); try check() }
         catch { try? FileManager.default.removeItem(at: dir); throw error }
-        let media = try FeedbackReportScreenshot.stage(record?.snapshot == nil && !omitScreenshot ? screenshot : nil, in: dir)
-        let value = FeedbackReportDraft(id: id, directory: dir, generation: model.identityGeneration, media: media)
+        // Text sends immediately. The attachment menu offers the captured screen explicitly.
+        let value = FeedbackReportDraft(id: id, directory: dir, generation: model.identityGeneration)
         try model.draftStore.save(value)
         saved = value
       }
@@ -249,7 +251,7 @@ struct FeedbackLiveConversation: View {
       try await save(current)
       if !value.media.isEmpty, !writeFeedbackConfirmedMarker(in: data.dir) { throw FeedbackHubError.storage }
       try model.draftStore.clear(id: data.id)
-      draft = nil
+      // Retain the composer identity while prepare creates the next draft.
     } catch is CancellationError { busy = false; reset = UUID(); return }
     catch { self.error = "Could not save your message. Please try again." }
     busy = false; reset = UUID()
@@ -267,6 +269,11 @@ struct FeedbackLiveConversation: View {
         if pending.hasMedia, !writeFeedbackConfirmedMarker(in: dir) { throw FeedbackHubError.storage }
         try model.draftStore.clear(id: pending.id)
       }
+      // Keep a separate editable draft while the accepted local message is delivered.
+      omitScreenshot = true
+      if draft == nil || draft?.id == pending.id { await prepare() }
+      if draft?.id == pending.id { draft = nil } // Preparation failed; retain the retry controls.
+      try check()
       if pending.hasMedia && !pending.uploaded {
         if FileManager.default.fileExists(atPath: dir.path) {
           guard writeFeedbackConfirmedMarker(in: dir) else { throw FeedbackHubError.storage }
@@ -300,7 +307,7 @@ struct FeedbackLiveConversation: View {
           current.pending = nil
           try await save(current)
           if !pending.hasMedia { try? FileManager.default.removeItem(at: dir) }
-          await prepare()
+          if draft == nil { await prepare() }
           return
         }
         try await save(current)

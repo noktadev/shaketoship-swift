@@ -10,6 +10,7 @@ struct FeedbackConversationView: View {
   var showsComposer = true
   var onDiscard: (() -> Void)?
   var onOptOut: (() -> Void)?
+  var onScreenshot: (() -> Void)?
   var welcome = "What would you like to tell us?"
   var invitation = "A problem, an idea, or something we can improve."
   let onSend: () -> Void
@@ -135,6 +136,11 @@ struct FeedbackConversationView: View {
       }
       HStack(alignment: .bottom, spacing: 10) {
         Menu {
+          if let onScreenshot {
+            Button("Attach current screen", systemImage: "rectangle.dashed", action: onScreenshot)
+              .disabled(input.isSending || input.deliveryPending ||
+                input.media.count >= FeedbackAttachmentBounds.maxItems)
+          }
           if input.capabilities.contains(.photoLibrary) {
             Button("Attach a photo or video", systemImage: "photo.on.rectangle", action: onAttach)
               .disabled(!input.canAttach)
@@ -149,7 +155,8 @@ struct FeedbackConversationView: View {
             .overlay(Circle().strokeBorder(.primary.opacity(0.12), lineWidth: 0.5))
         }
         .buttonStyle(.plain)
-        .disabled(input.isSending || input.recordingRequested)
+        .disabled(input.isSending || input.recordingRequested ||
+          (input.deliveryPending && onOptOut == nil))
         .accessibilityLabel("Attachments and message options")
         .accessibilityIdentifier("conversation-attach")
         HStack(alignment: .bottom, spacing: 0) {
@@ -158,7 +165,7 @@ struct FeedbackConversationView: View {
               .lineLimit(1...5).textFieldStyle(.plain)
               .padding(.leading, 15).padding(.vertical, 11)
               .focused($editing)
-              .disabled(input.isSending || input.recordingRequested)
+              .disabled(input.recordingRequested)
               .accessibilityLabel("Message")
               .accessibilityIdentifier("conversation-message")
           } else {

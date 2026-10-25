@@ -31,20 +31,21 @@ struct FeedbackConversationInput: Equatable, Sendable {
   var text = ""
   var media: [FeedbackMediaItem] = []
   var isSending = false
+  var deliveryPending = false
   var recordingRequested = false
   var capabilities: Capabilities = .microphoneFree
   var recordingAvailable = false
 
   var canSend: Bool {
-    !isSending && !recordingRequested && FeedbackComposerRules.sendEnabled(media: media,
+    !isSending && !deliveryPending && !recordingRequested && FeedbackComposerRules.sendEnabled(media: media,
       note: capabilities.contains(.text) ? text : "")
   }
   var canRecord: Bool {
-    !isSending && !recordingRequested && recordingAvailable && capabilities.contains(.screenRecording)
+    !isSending && !deliveryPending && !recordingRequested && recordingAvailable && capabilities.contains(.screenRecording)
       && media.count < FeedbackAttachmentBounds.maxItems
   }
   var canAttach: Bool {
-    !isSending && !recordingRequested && FeedbackComposerRules.showsAttach(capabilities: capabilities, mediaCount: media.count)
+    !isSending && !deliveryPending && !recordingRequested && FeedbackComposerRules.showsAttach(capabilities: capabilities, mediaCount: media.count)
   }
   var recordingDescription: String {
     capabilities.contains(.microphone) ? "Record your screen. Voice is optional." : "Record your screen."

@@ -9,6 +9,9 @@ struct FeedbackReportConversation: View {
   let actionReset: UUID
   let sending: Bool
   let error: String?
+  let screenshot: Data?
+  let deliveryPending: Bool
+  let onRetry: (String) -> Void
   let onSave: (FeedbackComposerDraftValue) throws -> Void
   let onSend: (FeedbackComposerResult) -> Void
   let onRecord: (FeedbackComposerDraftValue) throws -> Void
@@ -18,20 +21,24 @@ struct FeedbackReportConversation: View {
   @State private var showPicker = false
   @State private var localError: String?
   @State private var acted = false
+  @State private var submittedInput: FeedbackConversationInput?
 
   init(messages: [FeedbackConversationMessage] = [], data: FeedbackComposerData, actionReset: UUID, sending: Bool, error: String?,
+    deliveryPending: Bool = false, screenshot: Data? = nil, onRetry: @escaping (String) -> Void = { _ in },
     onSave: @escaping (FeedbackComposerDraftValue) throws -> Void,
     onSend: @escaping (FeedbackComposerResult) -> Void,
     onRecord: @escaping (FeedbackComposerDraftValue) throws -> Void,
     onDiscard: @escaping () -> Void, onOptOut: (() -> Void)?) {
     self.messages = messages
+    self.screenshot = screenshot
+    self.deliveryPending = deliveryPending; self.onRetry = onRetry
     self.actionReset = actionReset
     self.data = data; self.sending = sending; self.error = error
     self.onSave = onSave; self.onSend = onSend; self.onRecord = onRecord
     self.onDiscard = onDiscard; self.onOptOut = onOptOut
     _input = State(initialValue: FeedbackConversationInput(
       text: [data.initialTitle, data.initialNote].filter { !$0.isEmpty }.joined(separator: "\n\n"),
-      media: data.initialMedia, capabilities: data.capabilities,
+      media: data.initialMedia, isSending: sending, deliveryPending: deliveryPending, capabilities: data.capabilities,
       recordingAvailable: FeedbackManualTrigger.isRecordingAvailable))
   }
 
@@ -39,40 +46,71 @@ struct FeedbackReportConversation: View {
     FeedbackComposerDraftValue(title: "", note: input.text, media: input.media)
   }
 
+  private var screenshotAction: (() -> Void)? {
+    guard screenshot != nil,
+      !input.media.contains(where: { $0.url.lastPathComponent == "report-screenshot.jpg" }) else { return nil }
+    return { attachScreenshot() }
+  }
+
   var body: some View {
     FeedbackConversationView(messages: messages, input: $input, error: localError ?? error,
-      onDiscard: onDiscard, onOptOut: onOptOut,
+      onDiscard: deliveryPending ? nil : onDiscard, onOptOut: onOptOut,
+      onScreenshot: screenshotAction,
       welcome: "What would you like to tell us?",
       invitation: "A problem, an idea, or something we can improve.",
       onSend: {
         guard !acted, input.canSend else { return }
         do {
           try onSave(draft)
+          let result = FeedbackComposerResult(media: input.media,
+            note: input.capabilities.contains(.text) ? input.text : "")
+          submittedInput = input
           acted = true
+          input.text = ""
+          input.media = []
           input.isSending = true
-          onSend(FeedbackComposerResult(media: input.media,
-            note: input.capabilities.contains(.text) ? input.text : ""))
+          onSend(result)
         } catch { localError = "Could not save your message. Please try again." }
       }, onRecord: {
         guard !acted, input.canRecord else { return }
         do { try onRecord(draft); acted = true; input.recordingRequested = true }
         catch { localError = "Could not start recording. Please try again." }
-      }, onAttach: { showPicker = true }, onRetry: { _ in }, onRemove: remove)
-      .disabled(acted && !sending)
+      }, onAttach: { showPicker = true }, onRetry: onRetry, onRemove: remove)
       .onChange(of: input.text) { _, _ in
         guard !acted else { return }
         do { try onSave(draft); localError = nil }
         catch { localError = "Could not save your message. Please try again." }
       }
-      .onChange(of: actionReset) { _, _ in
+      .onChange(of: data.id) { _, _ in
+        let nextText = submittedInput == nil
+          ? [data.initialTitle, data.initialNote].filter { !$0.isEmpty }.joined(separator: "\n\n")
+          : input.text
+        input = FeedbackConversationInput(text: nextText, media: data.initialMedia,
+          isSending: sending, deliveryPending: deliveryPending, capabilities: data.capabilities,
+          recordingAvailable: FeedbackManualTrigger.isRecordingAvailable)
+        submittedInput = nil
         acted = false
-        input.isSending = false
+        do { try onSave(draft); localError = nil }
+        catch { localError = "Could not save your message. Please try again." }
+      }
+      .onChange(of: data.initialMedia) { _, media in
+        if submittedInput == nil { input.media = media }
+      }
+      .onChange(of: actionReset) { _, _ in
+        if let submitted = submittedInput, !deliveryPending {
+          let nextText = input.text
+          input = submitted
+          if !nextText.isEmpty { input.text += "\n\n" + nextText }
+          submittedInput = nil
+        }
+        acted = submittedInput != nil
+        input.isSending = sending
         input.recordingRequested = false
       }
       .onChange(of: sending) { _, value in
         input.isSending = value
-
       }
+      .onChange(of: deliveryPending) { _, value in input.deliveryPending = value }
       .onAppear { input.recordingAvailable = FeedbackManualTrigger.isRecordingAvailable }
       .sheet(isPresented: $showPicker) {
         FeedbackPhotoPicker(
@@ -94,6 +132,18 @@ struct FeedbackReportConversation: View {
             }
           }.ignoresSafeArea()
       }
+  }
+
+  private func attachScreenshot() {
+    guard !acted, !sending, !deliveryPending,
+      input.media.count < FeedbackAttachmentBounds.maxItems else { return }
+    do {
+      let media = try FeedbackReportScreenshot.stage(screenshot, in: data.dir)
+      let updated = input.media + media
+      try onSave(FeedbackComposerDraftValue(title: "", note: input.text, media: updated))
+      input.media = updated
+      localError = nil
+    } catch { localError = "Could not add the screenshot. Please try again." }
   }
 
   private func remove(_ item: FeedbackMediaItem) {

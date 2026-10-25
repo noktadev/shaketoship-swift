@@ -64,6 +64,28 @@ struct FeedbackHubClientTests {
       storage
     )
   }
+  @MainActor @Test func readinessObservesPresentationRegistrationAndDeactivation() async throws {
+    let transport = HubTestTransport()
+    let (client, root, _) = try fixture(transport: transport, hub: [.support])
+    defer {
+      ShakeToShip.present = nil
+      ShakeToShip.model = nil
+      try? FileManager.default.removeItem(at: root)
+    }
+    ShakeToShip.present = nil
+    let model = FeedbackHubModel(client: client, config: await client.config)
+    ShakeToShip.model = model
+    #expect(!ShakeToShip.isHubAvailable)
+    await confirmation("presentation registration updates the host") { changed in
+      withObservationTracking { _ = ShakeToShip.isHubAvailable } onChange: { changed() }
+      ShakeToShip.present = { _ in }
+    }
+    #expect(ShakeToShip.isHubAvailable)
+    model.active = false
+    #expect(!ShakeToShip.isHubAvailable)
+    #expect(await transport.requests.isEmpty)
+  }
+
   @MainActor @Test func publicUnreadStateUsesOnlyCachedInboxAndClearsOnReset() async throws {
     let transport = HubTestTransport()
     let (client, root, _) = try fixture(transport: transport, hub: [.inbox])

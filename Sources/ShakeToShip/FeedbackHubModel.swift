@@ -343,8 +343,13 @@ public enum ShakeToShip {
   #if canImport(UIKit)
   static weak var hostWindow: UIWindow?
   #endif
-  static var present: ((Int) -> Void)?
+  static var present: ((Int) -> Void)? {
+    get { FeedbackHubRuntime.shared.present }
+    set { FeedbackHubRuntime.shared.present = newValue }
+  }
   private static var activation = UUID()
+  /// Observable readiness for hosts that continue into chat after enabling feedback.
+  public static var isHubAvailable: Bool { model?.active == true && present != nil }
   /// Cached unread messages from the last inbox fetch. Never performs network I/O.
   /// Returns zero before a fetch, after identity reset, and while the hub is inactive.
   public static var unreadInboxCount: Int {
@@ -394,13 +399,13 @@ public enum ShakeToShip {
       let client = try FeedbackHubClient(config: config, storage: .live(config: config))
       let model = FeedbackHubModel(client: client, config: config)
       self.model = model
-      self.present = present
       await model.connect()
       await client.setActive(true)
       guard activation == expected, model.active else {
         await client.setActive(false)
         return
       }
+      self.present = present
       await model.start()
     } catch { /* Storage failure leaves the hub absent. */  }
   }
@@ -436,6 +441,7 @@ public enum ShakeToShip {
 @MainActor @Observable
 private final class FeedbackHubRuntime {
   static let shared = FeedbackHubRuntime()
+  var present: ((Int) -> Void)?
   var model: FeedbackHubModel?
 }
 private struct FeedbackPromptBanner: View {
