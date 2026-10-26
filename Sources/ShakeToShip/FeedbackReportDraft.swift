@@ -50,7 +50,7 @@ struct FeedbackReportDraftStore: Sendable {
   /// A confirmed legacy upload can finish before its draft pointer is removed.
   /// Remove only the stale pointer, never an unowned directory.
   func clearMissingDirectoryRecord() throws {
-    guard let draft = try storage.read(FeedbackReportDraft.self, file: Self.file),
+    guard let draft = try readDraft(),
       !FileManager.default.fileExists(atPath: draft.directory.path) else { return }
     guard draft.generation == generation, UUID(uuidString: draft.id) != nil,
       draft.directory.lastPathComponent == draft.id, ownsDirectory(draft.directory) else {
@@ -59,7 +59,7 @@ struct FeedbackReportDraftStore: Sendable {
     try FileManager.default.removeItem(at: storage.root.appendingPathComponent(Self.file))
   }
   func load() throws -> FeedbackReportDraft? {
-    guard let draft = try storage.read(FeedbackReportDraft.self, file: Self.file) else { return nil }
+    guard let draft = try readDraft() else { return nil }
     try validate(draft)
     return draft
   }
@@ -69,13 +69,41 @@ struct FeedbackReportDraftStore: Sendable {
     try storage.write(draft, file: Self.file)
   }
   func clear(id: String) throws {
-    guard let draft = try storage.read(FeedbackReportDraft.self, file: Self.file), draft.id == id else { return }
+    guard let draft = try readDraft(), draft.id == id else { return }
     try validate(draft)
     let marker = draft.directory.appendingPathComponent(Self.marker)
     if FileManager.default.fileExists(atPath: marker.path) { try FileManager.default.removeItem(at: marker) }
     do { try FileManager.default.removeItem(at: storage.root.appendingPathComponent(Self.file)) }
     catch { try? Data().write(to: marker, options: .atomic); throw error }
   }
+  /// App updates can relocate the data container. Resolve saved paths only into
+  /// this outbox and verify its identity binding before exposing or writing a draft.
+  private func readDraft() throws -> FeedbackReportDraft? {
+    guard let draft = try storage.read(FeedbackReportDraft.self, file: Self.file) else { return nil }
+    guard !ownsDirectory(draft.directory) else { return draft }
+    guard draft.directory.isFileURL, draft.generation == generation,
+      UUID(uuidString: draft.id) != nil, draft.directory.lastPathComponent == draft.id,
+      draft.directory.deletingLastPathComponent().lastPathComponent == outboxRoot.lastPathComponent else {
+      throw FeedbackHubError.identityChanged
+    }
+    let directory = outboxRoot.appendingPathComponent(draft.id, isDirectory: true)
+    let oldPrefix = draft.directory.standardizedFileURL.path + "/"
+    let media = try draft.media.map { item -> FeedbackMediaItem in
+      let path = item.url.standardizedFileURL.path
+      guard item.url.isFileURL, path.hasPrefix(oldPrefix) else { throw FeedbackHubError.storage }
+      let url = directory.appendingPathComponent(String(path.dropFirst(oldPrefix.count)))
+      switch item {
+      case .recorded: return .recorded(url)
+      case .picked(_, let kind): return .picked(url, kind)
+      }
+    }
+    let restored = FeedbackReportDraft(id: draft.id, directory: directory, generation: draft.generation,
+      title: draft.title, note: draft.note, media: media, events: draft.events, captureID: draft.captureID)
+    try validate(restored)
+    try storage.write(restored, file: Self.file)
+    return restored
+  }
+
   private func validate(_ draft: FeedbackReportDraft) throws {
     guard draft.generation == generation, UUID(uuidString: draft.id) != nil,
       draft.directory.lastPathComponent == draft.id, ownsDirectory(draft.directory),

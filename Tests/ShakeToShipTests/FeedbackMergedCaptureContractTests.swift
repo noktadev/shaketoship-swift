@@ -52,7 +52,7 @@ struct FeedbackMergedCaptureContractTests {
       #expect(body["sessionId"] as? String == "external-capture")
       #expect(body["purpose"] as? [String: String] == ["kind": "idea", "ideaId": ideaID])
       #expect(body["appBundleId"] as? String == config.app)
-      #expect(body["sdkVersion"] as? String == "2.0.0")
+      #expect(body["sdkVersion"] as? String == "3.0.0")
       #expect(body["hasNarration"] as? Bool == false)
       #expect(body["hasAppAudio"] as? Bool == false)
       #expect(body["capSeconds"] as? Double == config.maxDuration)

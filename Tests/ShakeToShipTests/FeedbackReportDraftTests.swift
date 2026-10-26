@@ -91,6 +91,59 @@ private actor PausedJoining: FeedbackVideoJoining {
     #expect(restored.media == [.picked(image, .image)])
   }
 
+  @Test func draftSurvivesContainerRelocation() throws {
+    let f = try fixture()
+    let moved = f.root.appendingPathExtension("moved")
+    defer { try? FileManager.default.removeItem(at: f.root); try? FileManager.default.removeItem(at: moved) }
+    var draft = f.draft
+    draft.note = "Keep my feedback"
+    let image = draft.directory.appendingPathComponent("picked.jpg")
+    try Data("image".utf8).write(to: image)
+    draft.media = [.picked(image, .image)]
+    try f.store.save(draft)
+    try FileManager.default.moveItem(at: f.root, to: moved)
+    let storage = FeedbackHubStorage(scope: f.storage.scope, root: moved.appendingPathComponent("hub"),
+      readIdentity: { nil }, writeIdentity: { _ in })
+    let store = FeedbackReportDraftStore(storage: storage, generation: f.store.generation,
+      outboxRoot: moved.appendingPathComponent("outbox"))
+    // The conversation uses this exact sequence before showing its input.
+    try store.clearMissingDirectoryRecord()
+    let restored = try #require(try store.load())
+    #expect(restored.note == "Keep my feedback")
+    #expect(restored.directory == store.outboxRoot.appendingPathComponent(draft.id, isDirectory: true))
+    #expect(try Data(contentsOf: restored.media[0].url) == Data("image".utf8))
+    try store.save(restored)
+    try store.clear(id: restored.id)
+    #expect(try store.load() == nil)
+  }
+
+  @Test(arguments: ["scope", "generation", "missing-binding", "outside-media", "symlink"])
+  func relocationRejectsUnownedDataWithoutChangingTheDraft(failure: String) throws {
+    let f = try fixture()
+    defer { try? FileManager.default.removeItem(at: f.root) }
+    let oldDirectory = URL(fileURLWithPath: "/old-container/outbox/" + f.draft.id, isDirectory: true)
+    var draft = FeedbackReportDraft(id: f.draft.id, directory: oldDirectory, generation: f.store.generation)
+    draft.note = "Do not discard this message"
+    if failure == "outside-media" { draft.media = [.picked(URL(fileURLWithPath: "/private/other.jpg"), .image)] }
+    if failure == "symlink" {
+      let outside = f.root.appendingPathComponent("outside.jpg")
+      try Data("private".utf8).write(to: outside)
+      try FileManager.default.createSymbolicLink(at: f.draft.directory.appendingPathComponent("link.jpg"), withDestinationURL: outside)
+      draft.media = [.picked(oldDirectory.appendingPathComponent("link.jpg"), .image)]
+    }
+    let bindingFile = f.draft.directory.appendingPathComponent(FeedbackCaptureBinding.filename)
+    if failure == "missing-binding" { try FileManager.default.removeItem(at: bindingFile) }
+    if failure == "scope" || failure == "generation" {
+      let binding = FeedbackCaptureBinding(scope: failure == "scope" ? "other" : f.storage.scope,
+        generation: failure == "generation" ? UUID() : f.store.generation, purpose: .feedback)
+      try JSONEncoder().encode(binding).write(to: bindingFile)
+    }
+    try f.storage.write(draft, file: "report-draft.json")
+    #expect(throws: FeedbackHubError.self) { try f.store.clearMissingDirectoryRecord() }
+    #expect(try f.storage.read(FeedbackReportDraft.self, file: "report-draft.json") == draft)
+    #expect(FileManager.default.fileExists(atPath: f.draft.directory.path))
+  }
+
   @Test func firstAndSecondRecordingKeepOneDraftAndCleanCaptureDirectories() async throws {
     let f = try fixture()
     defer { try? FileManager.default.removeItem(at: f.root) }

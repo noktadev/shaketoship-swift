@@ -60,6 +60,7 @@ struct FeedbackConversationView: View {
               .padding(.trailing, typeSize.isAccessibilitySize ? 0 : 28)
             }
             ForEach(messages) { message in messageRow(message) }
+            if showsComposer { quickReplies }
             Color.clear.frame(height: 1).id("conversation-end")
           }
           .padding()
@@ -191,24 +192,67 @@ struct FeedbackConversationView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
         .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.primary.opacity(0.12), lineWidth: 0.5))
       }
-
-      if input.recordingAvailable && input.capabilities.contains(.screenRecording) {
-        Button {
-          editing = false
-          onRecord()
-        } label: {
-          Label("Show us", systemImage: "record.circle")
-            .font(.subheadline.weight(.medium))
-            .frame(minHeight: 44)
-        }
-        .buttonStyle(.plain).foregroundStyle(theme.primaryText ?? .primary)
-        .disabled(!input.canRecord)
-        .accessibilityHint(input.recordingDescription)
-        .accessibilityIdentifier("conversation-record")
-      }
     }
     .padding(.horizontal).padding(.vertical, 12)
     .background(canvas)
+  }
+
+  @ViewBuilder private var quickReplies: some View {
+    if input.capabilities.contains(.text) ||
+      (input.recordingAvailable && input.capabilities.contains(.screenRecording)) {
+      VStack(alignment: .trailing, spacing: 8) {
+        if input.capabilities.contains(.text) {
+          quickReply("I found a problem", id: "problem")
+          quickReply("I have an idea", id: "idea")
+        }
+        if input.recordingAvailable && input.capabilities.contains(.screenRecording) {
+          Button {
+            editing = false
+            onRecord()
+          } label: {
+            Label("Let me show you", systemImage: "record.circle")
+          }
+          .disabled(!input.canRecord)
+          .accessibilityHint(input.recordingDescription)
+          .accessibilityIdentifier("conversation-record")
+        }
+      }
+      .font(.subheadline)
+      .multilineTextAlignment(.center)
+      .buttonStyle(QuickReplyButtonStyle(canvas: canvas, outline: accent,
+        text: theme.primaryText ?? .primary))
+      .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+  }
+
+  private func quickReply(_ text: String, id: String) -> some View {
+    Button {
+      let separator = input.text.isEmpty || input.text.hasSuffix("\n") ? "" : "\n"
+      input.text += separator + text + ": "
+      editing = true
+    } label: {
+      Text(text)
+    }
+    .disabled(input.recordingRequested)
+    .accessibilityHint("Adds text to your message. You can edit it before sending.")
+    .accessibilityIdentifier("conversation-quick-" + id)
+  }
+
+  private struct QuickReplyButtonStyle: ButtonStyle {
+    let canvas: Color
+    let outline: Color
+    let text: Color
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+      configuration.label
+        .padding(.horizontal, 16)
+        .frame(minHeight: 44)
+        .foregroundStyle(text)
+        .background(canvas, in: Capsule())
+        .overlay(Capsule().strokeBorder(outline.opacity(0.5), lineWidth: 1))
+        .opacity(isEnabled ? (configuration.isPressed ? 0.65 : 1) : 0.4)
+    }
   }
 
   private func attachment(_ item: FeedbackMediaItem, removable: Bool) -> some View {

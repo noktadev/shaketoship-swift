@@ -63,7 +63,7 @@ private let feedbackCompletionFile = "complete.json"
 private let feedbackCompletionBody = Data(#"{"version":1}"#.utf8)
 private let feedbackUploadManifestFile = ".upload-manifest.json"
 private let feedbackPermanentFailureFile = ".upload-failure.json"
-private let shakeToShipSDKVersion = "2.0.0"
+private let shakeToShipSDKVersion = "3.0.0"
 
 enum FeedbackUploadResult: Sendable, Equatable {
   case uploaded
