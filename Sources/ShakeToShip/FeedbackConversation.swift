@@ -24,6 +24,7 @@ struct FeedbackConversationMessage: Identifiable, Equatable, Sendable {
   var text: String
   var media: [FeedbackMediaItem] = []
   var delivery: Delivery?
+  var canRetry = true
 }
 
 /// Reuses the report composer's capability and attachment rules.
@@ -37,15 +38,15 @@ struct FeedbackConversationInput: Equatable, Sendable {
   var recordingAvailable = false
 
   var canSend: Bool {
-    !isSending && !deliveryPending && !recordingRequested && FeedbackComposerRules.sendEnabled(media: media,
+    !isSending && !recordingRequested && FeedbackComposerRules.sendEnabled(media: media,
       note: capabilities.contains(.text) ? text : "")
   }
   var canRecord: Bool {
-    !isSending && !deliveryPending && !recordingRequested && recordingAvailable && capabilities.contains(.screenRecording)
+    !isSending && !recordingRequested && recordingAvailable && capabilities.contains(.screenRecording)
       && media.count < FeedbackAttachmentBounds.maxItems
   }
   var canAttach: Bool {
-    !isSending && !deliveryPending && !recordingRequested && FeedbackComposerRules.showsAttach(capabilities: capabilities, mediaCount: media.count)
+    !isSending && !recordingRequested && FeedbackComposerRules.showsAttach(capabilities: capabilities, mediaCount: media.count)
   }
   var recordingDescription: String {
     capabilities.contains(.microphone) ? "Record your screen. Voice is optional." : "Record your screen."

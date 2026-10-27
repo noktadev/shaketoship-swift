@@ -3,11 +3,12 @@ import Testing
 @testable import ShakeToShip
 
 @Suite struct FeedbackConversationTests {
-  @Test func pendingDeliveryKeepsNextDraftButPreventsOverlappingSendAndRecording() {
+  @Test func pendingDeliveryKeepsNextDraftAndItsActionsAvailable() {
     var input = FeedbackConversationInput(text: "Next message", deliveryPending: true,
       capabilities: .all, recordingAvailable: true)
-    #expect(!input.canSend)
-    #expect(!input.canRecord)
+    #expect(input.canSend)
+    #expect(input.canRecord)
+    #expect(input.canAttach)
     input.text += " with more detail"
     input.deliveryPending = false
     #expect(input.canSend)

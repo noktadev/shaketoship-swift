@@ -3,12 +3,15 @@ import SwiftUI
 
 struct FeedbackLiveConversation: View {
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
   @Environment(\.shakeToShipTheme) private var theme
   @Bindable var model: FeedbackHubModel
   var screenshot: Data?
   @State private var record: FeedbackConversationRecord?
   @State private var draft: FeedbackComposerData?
   @State private var busy = false
+  @State private var submitting = false
+  @State private var deliveryTask: Task<Void, Never>?
   @State private var preparing = false
   private var error: String? {
     get { model.error }
@@ -26,10 +29,11 @@ struct FeedbackLiveConversation: View {
         text: message.text.isEmpty && message.sessionId != nil ? "Recording attached" : message.text,
         delivery: message.role == "user" ? .sent : nil)
     }
-    if let pending = record?.pending {
-      let delivery: FeedbackConversationMessage.Delivery = busy ? .sending : .failed
+    for (index, pending) in (record?.pendingMessages ?? []).enumerated() {
+      let delivery: FeedbackConversationMessage.Delivery = index == 0 ? (busy ? .sending : .failed) : .queued
       if let index = result.firstIndex(where: { $0.id.lowercased() == pending.id.lowercased() }) {
         result[index].delivery = .waitingReply
+        result[index].canRetry = !busy
       } else {
         result.append(.init(id: pending.id, role: .user,
           text: pending.text.isEmpty ? "Recording attached" : pending.text, delivery: delivery))
@@ -45,7 +49,7 @@ struct FeedbackLiveConversation: View {
             Button("New conversation", systemImage: "square.and.pencil") {
               if record?.pending != nil { confirmNew = true }
               else { operation = Task { await startNew() } }
-            }.disabled(busy)
+            }.disabled(busy || submitting)
           }
           Button("Cancel", role: .cancel) { dismiss() }
         } label: {
@@ -67,10 +71,10 @@ struct FeedbackLiveConversation: View {
         }
         if let draft {
           FeedbackReportConversation(messages: messages, data: draft, actionReset: reset,
-            sending: busy, error: error,
-            deliveryPending: record?.pending != nil,
+            sending: submitting, error: error,
+            deliveryPending: record?.pendingMessages.contains(where: { $0.id == draft.id }) == true,
             screenshot: omitScreenshot ? nil : screenshot,
-            onRetry: { _ in operation = Task { await resume() } },
+            onRetry: { _ in startDelivery() },
             onSave: { try saveDraft($0, id: draft.id) },
             onSend: { value in operation = Task { await submit(draft, value) } },
             onRecord: { value in
@@ -81,9 +85,9 @@ struct FeedbackLiveConversation: View {
             }, onDiscard: { discard(draft) }, onOptOut: model.config.onOptOut)
         } else {
           FeedbackConversationView(messages: messages, input: .constant(FeedbackConversationInput(isSending: busy, capabilities: [])), error: error, showsComposer: false,
-            onSend: {}, onRecord: {}, onAttach: {}, onRetry: { _ in operation = Task { await resume() } }, onRemove: { _ in })
+            onSend: { _ in }, onRecord: {}, onAttach: {}, onRetry: { _ in startDelivery() }, onRemove: { _ in })
           if let error { Text(error).padding().accessibilityAddTraits(.updatesFrequently) }
-          if record?.pending == nil && error != nil { Button("Try again") { operation = Task { await load() } }.disabled(busy) }
+          if record?.pending == nil && error != nil { Button("Try again") { operation = Task { await load() } }.disabled(busy || submitting) }
         }
       }
       .background(theme.background ?? Color(uiColor: .systemGroupedBackground))
@@ -95,11 +99,25 @@ struct FeedbackLiveConversation: View {
       Button("Start new conversation") { operation = Task { await abandonPending() } }
       Button("Cancel", role: .cancel) {}
     } message: {
-      Text("Messages already sent remain with the team. Any unsent recording for this message is removed.")
+      Text("Messages already sent remain with the team. Unsent messages and their recordings are removed.")
     }
-    .onDisappear { operation?.cancel() }
+    .onDisappear { operation?.cancel(); deliveryTask?.cancel() }
     .background(FeedbackSDKPresentationMarker())
     .task { await load() }
+    .task(id: scenePhase) {
+      guard scenePhase == .active else { return }
+      while !Task.isCancelled {
+        if let current = record, current.snapshot != nil {
+          do {
+            let refreshed = try await model.client.refreshConversation(current)
+            try check()
+            if record?.id == refreshed.id { apply(refreshed) }
+          } catch is CancellationError { return }
+          catch { /* Keep the draft and transcript available while offline. */ }
+        }
+        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+      }
+    }
     .onChange(of: model.revision) { _, _ in record = nil; draft = nil; dismiss() }
     .onChange(of: model.active) { _, active in if !active { record = nil; draft = nil; dismiss() } }
   }
@@ -120,12 +138,12 @@ struct FeedbackLiveConversation: View {
       try check()
       record = try await model.client.loadConversation()
       try check()
-      if record?.pending != nil { await resume() } else { await prepare() }
+      if record?.pending != nil { startDelivery() } else { await prepare() }
     } catch is CancellationError { return }
     catch { self.error = "Could not load this conversation. Please try again." }
   }
   private func startNew() async {
-    guard !busy, record?.pending == nil else { return }
+    guard !busy, !submitting, record?.pending == nil else { return }
     // Keep an unsent message in its existing draft; only the destination conversation changes.
     do { try await save(.init(generation: model.identityGeneration, id: UUID().uuidString.lowercased())) }
     catch is CancellationError { return }
@@ -140,6 +158,13 @@ struct FeedbackLiveConversation: View {
       try check()
       try model.draftStore.clearMissingDirectoryRecord()
       var saved = try model.draftStore.load()
+      // A crash may leave the draft pointer on any accepted queue item, not
+      // only the message currently being uploaded. Never expose it for editing.
+      if let accepted = saved, let pending = record?.pendingMessages.first(where: { $0.id == accepted.id }) {
+        if pending.hasMedia, !writeFeedbackConfirmedMarker(in: accepted.directory) { throw FeedbackHubError.storage }
+        try model.draftStore.clear(id: accepted.id)
+        saved = nil
+      }
       if var current = saved, let captureID = current.captureID {
         let capture = current.directory.deletingLastPathComponent().appendingPathComponent(captureID)
         if let bytes = try? Data(contentsOf: capture.appendingPathComponent("events.json")),
@@ -217,8 +242,8 @@ struct FeedbackLiveConversation: View {
     } catch { self.error = "Could not discard your message."; reset = UUID() }
   }
   private func submit(_ data: FeedbackComposerData, _ value: FeedbackComposerResult) async {
-    guard !busy, !capturePending, var current = record, current.pending == nil else { return }
-    busy = true; error = nil
+    guard !submitting, !capturePending, var current = record else { return }
+    submitting = true; error = nil
     do {
       try check()
       let encoded = try JSONSerialization.data(withJSONObject: ["app": model.config.app,
@@ -226,10 +251,15 @@ struct FeedbackLiveConversation: View {
         "sessionId": "00000000-0000-4000-8000-000000000000"])
       guard value.note.utf16.count <= FeedbackConversationRecord.maxTextLength, encoded.count <= 8192 else {
         error = "Please shorten your message to 4,000 characters or fewer."
-        busy = false; reset = UUID(); return
+        submitting = false; reset = UUID(); return
       }
-      if (current.snapshot?.messages.count ?? 0) >= 39 {
+      if current.pending == nil && (current.snapshot?.messages.count ?? 0) >= 39 {
         current = .init(generation: model.identityGeneration, id: UUID().uuidString.lowercased())
+        try await save(current)
+      }
+      guard current.reservedMessageCount < 39 else {
+        error = "This conversation is full. Start a new conversation after delivery finishes."
+        submitting = false; reset = UUID(); return
       }
       if !value.media.isEmpty {
         // Unsent legacy drafts migrate in prepare; presigned report purposes never change.
@@ -243,77 +273,95 @@ struct FeedbackLiveConversation: View {
           events: value.media.contains(where: \.isRecorded) ? data.events : [])
         try JSONEncoder().encode(session).write(to: data.dir.appendingPathComponent("events.json"), options: .atomic)
       }
-      current.pending = .init(id: data.id, text: value.note, hasMedia: !value.media.isEmpty)
+      let pending = FeedbackConversationRecord.Pending(id: data.id, text: value.note, hasMedia: !value.media.isEmpty)
       // The draft marker protects the files until the confirmed marker takes over.
       if !value.media.isEmpty {
         try Data().write(to: data.dir.appendingPathComponent(FeedbackConversationRecord.pendingMarker), options: .atomic)
       }
-      try await save(current)
+      let accepted = try await model.client.enqueueConversation(current, message: pending)
+      try check()
+      apply(accepted)
       if !value.media.isEmpty, !writeFeedbackConfirmedMarker(in: data.dir) { throw FeedbackHubError.storage }
       try model.draftStore.clear(id: data.id)
-      // Retain the composer identity while prepare creates the next draft.
-    } catch is CancellationError { busy = false; reset = UUID(); return }
+      // Prepare the next independent draft before network delivery starts.
+      omitScreenshot = true
+      await prepare()
+    } catch is CancellationError { submitting = false; reset = UUID(); return }
     catch { self.error = "Could not save your message. Please try again." }
-    busy = false; reset = UUID()
-    if record?.pending != nil { await resume() }
+    submitting = false; reset = UUID()
+    if record?.pending != nil { startDelivery() }
+  }
+  private func apply(_ value: FeedbackConversationRecord) {
+    guard record?.id != value.id || (value.revision ?? 0) >= (record?.revision ?? 0) else { return }
+    record = value
+  }
+  private func startDelivery() {
+    guard !busy, record?.pending != nil else { return }
+    busy = true
+    deliveryTask = Task { await resume() }
   }
   private func resume() async {
-    guard !busy, var current = record, var pending = current.pending else { return }
-    busy = true; error = nil
-    defer { busy = false; reset = UUID() }
+    error = nil
+    defer { busy = false }
     do {
-      try check()
-      let dir = model.draftStore.outboxRoot.appendingPathComponent(pending.id)
-      // Recover a crash after the pending record was written but before the draft was cleared.
-      if (try? model.draftStore.load())?.id == pending.id {
-        if pending.hasMedia, !writeFeedbackConfirmedMarker(in: dir) { throw FeedbackHubError.storage }
-        try model.draftStore.clear(id: pending.id)
-      }
-      // Keep a separate editable draft while the accepted local message is delivered.
-      omitScreenshot = true
-      if draft == nil || draft?.id == pending.id { await prepare() }
-      if draft?.id == pending.id { draft = nil } // Preparation failed; retain the retry controls.
-      try check()
-      if pending.hasMedia && !pending.uploaded {
-        if FileManager.default.fileExists(atPath: dir.path) {
-          guard writeFeedbackConfirmedMarker(in: dir) else { throw FeedbackHubError.storage }
-          let uploader = FeedbackUploader(config: model.config, transport: FeedbackBackgroundUploads.transport,
-            fileManager: .default, outboxRoot: model.draftStore.outboxRoot, hubClient: model.client)
-          switch await uploader.upload(sessionId: pending.id) {
-          case .uploaded: break
-          case .retryableFailure: throw FeedbackHubError.storage
-          case .recordingTooLarge:
-            error = "The recording is too large. Start a new conversation with a shorter recording."
-            return
-          case .rejected:
-            error = "This recording cannot be sent. Start a new conversation to continue."
-            return
-          }
+      while var current = record, var pending = current.pending {
+        try check()
+        let dir = model.draftStore.outboxRoot.appendingPathComponent(pending.id)
+        // Recover a crash after the pending record was written but before the draft was cleared.
+        if (try? model.draftStore.load())?.id == pending.id {
+          if pending.hasMedia, !writeFeedbackConfirmedMarker(in: dir) { throw FeedbackHubError.storage }
+          try model.draftStore.clear(id: pending.id)
+        }
+        // Keep a separate editable draft while the accepted local message is delivered.
+        omitScreenshot = true
+        if !submitting && !preparing && (draft == nil || draft?.id == pending.id) {
+          await prepare()
+          if draft?.id == pending.id { draft = nil } // Preparation failed; retain the retry controls.
         }
         try check()
-        guard let session = try await model.client.ownedSessions().first(where: { $0.captureId == pending.id && $0.purpose == .feedback }) else {
-          throw FeedbackHubError.storage
+        if pending.hasMedia && !pending.uploaded {
+          if FileManager.default.fileExists(atPath: dir.path) {
+            guard writeFeedbackConfirmedMarker(in: dir) else { throw FeedbackHubError.storage }
+            let uploader = FeedbackUploader(config: model.config, transport: FeedbackBackgroundUploads.transport,
+              fileManager: .default, outboxRoot: model.draftStore.outboxRoot, hubClient: model.client)
+            switch await uploader.upload(sessionId: pending.id) {
+            case .uploaded: break
+            case .retryableFailure: throw FeedbackHubError.storage
+            case .recordingTooLarge:
+              error = "The recording is too large. Start a new conversation with a shorter recording."
+              return
+            case .rejected:
+              error = "This recording cannot be sent. Start a new conversation to continue."
+              return
+            }
+          }
+          try check()
+          guard let session = try await model.client.ownedSessions().first(where: { $0.captureId == pending.id && $0.purpose == .feedback }) else {
+            throw FeedbackHubError.storage
+          }
+          pending.sessionID = session.id
+          pending.uploaded = true
+          current = try await model.client.updateConversation(current, pending: pending)
+          try check()
+          apply(current)
         }
-        pending.sessionID = session.id
-        pending.uploaded = true
-        current.pending = pending
-        try await save(current)
-      }
-      // Bounded polling. A pending analysis remains retryable on the same message id.
-      for attempt in 0..<4 {
-        let snapshot = try await model.client.conversationTurn(current)
-        current.snapshot = snapshot
-        if !snapshot.pending {
-          current.pending = nil
-          try await save(current)
-          if !pending.hasMedia { try? FileManager.default.removeItem(at: dir) }
-          if draft == nil { await prepare() }
+        // Bounded polling. A pending analysis remains retryable on the same message id.
+        for attempt in 0..<4 {
+          let snapshot = try await model.client.conversationTurn(current)
+          current = try await model.client.updateConversation(current, pending: pending, snapshot: snapshot, completed: !snapshot.pending)
+          try check()
+          apply(current)
+          if !snapshot.pending {
+            if !pending.hasMedia { try? FileManager.default.removeItem(at: dir) }
+            break
+          }
+          if attempt < 3 { try await Task.sleep(for: .seconds(10)) }
+        }
+        if record?.pending?.id == pending.id {
+          error = "Your message is saved. The reply is not ready. Try again shortly."
           return
         }
-        try await save(current)
-        if attempt < 3 { try await Task.sleep(for: .seconds(10)) }
       }
-      error = "Your message is saved. The reply is not ready. Try again shortly."
     } catch is CancellationError { return }
     catch {
       if case FeedbackHubError.http(429, _, let delay) = error {
@@ -328,18 +376,23 @@ struct FeedbackLiveConversation: View {
     }
   }
   private func abandonPending() async {
-    guard !busy, let pending = record?.pending else { return }
+    guard !busy, !submitting, let current = record, current.pending != nil else { return }
     do {
       try check()
-      let dir = model.draftStore.outboxRoot.appendingPathComponent(pending.id)
-      guard UUID(uuidString: pending.id) != nil, model.draftStore.ownsDirectory(dir) else { throw FeedbackHubError.storage }
-      if let binding = try FeedbackCaptureBinding.read(in: dir) {
-        guard binding.scope == model.client.storage.scope, binding.generation == model.identityGeneration else { throw FeedbackHubError.identityChanged }
+      let directories = try current.pendingMessages.map { pending -> URL in
+        let dir = model.draftStore.outboxRoot.appendingPathComponent(pending.id)
+        guard UUID(uuidString: pending.id) != nil, model.draftStore.ownsDirectory(dir) else { throw FeedbackHubError.storage }
+        if let binding = try FeedbackCaptureBinding.read(in: dir) {
+          guard binding.scope == model.client.storage.scope, binding.generation == model.identityGeneration else { throw FeedbackHubError.identityChanged }
+        }
+        return dir
       }
-      if (try? model.draftStore.load())?.id == pending.id { try model.draftStore.clear(id: pending.id) }
+      if let saved = try model.draftStore.load(), current.pendingMessages.contains(where: { $0.id == saved.id }) {
+        try model.draftStore.clear(id: saved.id)
+      }
       try await save(.init(generation: model.identityGeneration, id: UUID().uuidString.lowercased()))
-      try? FileManager.default.removeItem(at: dir)
-      draft = nil; omitScreenshot = true; error = nil
+      for dir in directories { try? FileManager.default.removeItem(at: dir) }
+      omitScreenshot = true; error = nil
       await prepare()
     } catch is CancellationError { return }
     catch { self.error = "Could not start a new conversation. Please try again." }

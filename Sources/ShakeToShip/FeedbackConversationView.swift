@@ -13,7 +13,7 @@ struct FeedbackConversationView: View {
   var onScreenshot: (() -> Void)?
   var welcome = "What would you like to tell us?"
   var invitation = "A problem, an idea, or something we can improve."
-  let onSend: () -> Void
+  let onSend: (FeedbackConversationInput) -> Void
   let onRecord: () -> Void
   let onAttach: () -> Void
   let onRetry: (String) -> Void
@@ -24,6 +24,7 @@ struct FeedbackConversationView: View {
   @Environment(\.dynamicTypeSize) private var typeSize
   @FocusState private var editing: Bool
   @State private var selectedMedia: FeedbackMediaItem?
+  @State private var textBridge = ConversationTextBridge()
 
   private var accent: Color { theme.accent ?? Color(red: 0.78, green: 0.22, blue: 0.0) }
   private var sentText: Color {
@@ -109,7 +110,7 @@ struct FeedbackConversationView: View {
             .accessibilityIdentifier("conversation-status-\(message.id)")
           if delivery == .failed || delivery == .waitingReply {
             Button(delivery == .waitingReply ? "Check for reply" : "Try sending again", systemImage: "arrow.clockwise") { onRetry(message.id) }
-              .buttonStyle(.bordered).disabled(input.isSending || input.recordingRequested)
+              .buttonStyle(.bordered).disabled(!message.canRetry || input.isSending || input.recordingRequested)
           }
         }
       }
@@ -139,7 +140,7 @@ struct FeedbackConversationView: View {
         Menu {
           if let onScreenshot {
             Button("Attach current screen", systemImage: "rectangle.dashed", action: onScreenshot)
-              .disabled(input.isSending || input.deliveryPending ||
+              .disabled(input.isSending ||
                 input.media.count >= FeedbackAttachmentBounds.maxItems)
           }
           if input.capabilities.contains(.photoLibrary) {
@@ -156,8 +157,7 @@ struct FeedbackConversationView: View {
             .overlay(Circle().strokeBorder(.primary.opacity(0.12), lineWidth: 0.5))
         }
         .buttonStyle(.plain)
-        .disabled(input.isSending || input.recordingRequested ||
-          (input.deliveryPending && onOptOut == nil))
+        .disabled(input.isSending || input.recordingRequested)
         .accessibilityLabel("Attachments and message options")
         .accessibilityIdentifier("conversation-attach")
         HStack(alignment: .bottom, spacing: 0) {
@@ -169,14 +169,17 @@ struct FeedbackConversationView: View {
               .disabled(input.recordingRequested)
               .accessibilityLabel("Message")
               .accessibilityIdentifier("conversation-message")
+              .background(ConversationTextAnchor(bridge: textBridge))
           } else {
             Text("Attach a photo or recording.").font(.callout)
               .foregroundStyle(theme.secondaryText ?? .secondary)
               .padding(12).frame(maxWidth: .infinity)
           }
           Button {
-            guard input.canSend else { return }
-            onSend()
+            var submitted = input
+            if let text = textBridge.commitText() { submitted.text = text }
+            guard submitted.canSend else { return }
+            onSend(submitted)
           } label: {
             if input.isSending { ProgressView() }
             else { Image(systemName: "arrow.up.circle.fill").font(.title) }
@@ -280,5 +283,47 @@ struct FeedbackConversationView: View {
     .background(theme.surface ?? Color(uiColor: .secondarySystemGroupedBackground),
       in: RoundedRectangle(cornerRadius: 14))
   }
+}
+/// Reads the focused native editor at the explicit Send boundary. SwiftUI's
+/// binding can still contain the preceding edit while UIKit displays newer text.
+/// Committing marked text keeps the keyboard and first responder in place.
+@MainActor private final class ConversationTextBridge {
+  weak var anchor: UIView?
+
+  func commitText() -> String? {
+    var ancestor = anchor?.superview
+    // Never search the host window. Require this field's identifier as well as
+    // native focus, and bound the search to nearby composer containers.
+    for _ in 0..<3 {
+      guard let view = ancestor, !(view is UIWindow) else { return nil }
+      if let editor = focusedEditor(in: view) {
+        editor.unmarkText()
+        guard let range = editor.textRange(from: editor.beginningOfDocument, to: editor.endOfDocument) else { return nil }
+        return editor.text(in: range)
+      }
+      ancestor = view.superview
+    }
+    return nil
+  }
+
+  private func focusedEditor(in view: UIView) -> (any UITextInput)? {
+    if view.accessibilityIdentifier == "conversation-message", view.isFirstResponder,
+      let editor = view as? any UITextInput { return editor }
+    for child in view.subviews {
+      if let editor = focusedEditor(in: child) { return editor }
+    }
+    return nil
+  }
+}
+
+private struct ConversationTextAnchor: UIViewRepresentable {
+  let bridge: ConversationTextBridge
+  func makeUIView(context: Context) -> UIView {
+    let view = UIView()
+    view.isUserInteractionEnabled = false
+    bridge.anchor = view
+    return view
+  }
+  func updateUIView(_ view: UIView, context: Context) { bridge.anchor = view }
 }
 #endif

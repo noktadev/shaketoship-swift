@@ -54,17 +54,17 @@ struct FeedbackReportConversation: View {
 
   var body: some View {
     FeedbackConversationView(messages: messages, input: $input, error: localError ?? error,
-      onDiscard: deliveryPending ? nil : onDiscard, onOptOut: onOptOut,
+      onDiscard: onDiscard, onOptOut: onOptOut,
       onScreenshot: screenshotAction,
       welcome: "What would you like to tell us?",
       invitation: "A problem, an idea, or something we can improve.",
-      onSend: {
-        guard !acted, input.canSend else { return }
+      onSend: { submitted in
+        guard !acted, submitted.canSend else { return }
         do {
-          try onSave(draft)
-          let result = FeedbackComposerResult(media: input.media,
-            note: input.capabilities.contains(.text) ? input.text : "")
-          submittedInput = input
+          try onSave(FeedbackComposerDraftValue(title: "", note: submitted.text, media: submitted.media))
+          let result = FeedbackComposerResult(media: submitted.media,
+            note: submitted.capabilities.contains(.text) ? submitted.text : "")
+          submittedInput = submitted
           acted = true
           input.text = ""
           input.media = []
@@ -135,7 +135,7 @@ struct FeedbackReportConversation: View {
   }
 
   private func attachScreenshot() {
-    guard !acted, !sending, !deliveryPending,
+    guard !acted, !sending,
       input.media.count < FeedbackAttachmentBounds.maxItems else { return }
     do {
       let media = try FeedbackReportScreenshot.stage(screenshot, in: data.dir)
