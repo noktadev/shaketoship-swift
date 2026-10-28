@@ -23,6 +23,7 @@ import SwiftUI
             FeedbackEntryLabel(title: actions.contains(.write) ? FeedbackHubEntryAction.write.title
               : FeedbackHubEntryAction.report.title, systemImage: actions.contains(.write) ? "square.and.pencil" : "ladybug")
           }
+          .badge(model.supportUnread)
           if model.config.hub.contains(.ideas) {
             Button { suggest = true } label: {
               FeedbackEntryLabel(title: "Suggest an idea", systemImage: "lightbulb")

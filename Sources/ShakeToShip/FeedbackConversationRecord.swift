@@ -17,6 +17,9 @@ struct FeedbackConversationSnapshot: Codable, Sendable, Equatable {
   let pending: Bool
   var revision: Int? = nil
   var replyMode: String? = nil
+  var replyError: String? = nil
+  /// Set only by a validated v3 admission envelope, never inferred from pending.
+  var acceptedMessageID: String? = nil
 }
 
 /// Stable ordered messages survive upload and network retries. Private hub storage
@@ -68,8 +71,25 @@ extension FeedbackHubClient {
   func saveConversation(_ record: FeedbackConversationRecord) throws {
     _ = try ownedSessions()
     guard record.generation == localGeneration else { throw FeedbackHubError.identityChanged }
+    try storage.write(record, file: "conversation-\(record.id).json")
     try storage.write(record, file: "conversation.json")
   }
+  func selectConversation(_ id: String) async throws -> FeedbackConversationRecord {
+    _ = try ownedSessions()
+    guard UUID(uuidString: id) != nil else { throw FeedbackHubError.invalidResponse }
+    let expected = localGeneration
+    let snapshot = try await decode(FeedbackConversationSnapshot.self, path: "v3/conversations/\(id)/messages")
+    guard expected == localGeneration, snapshot.id == id, snapshot.messages.count <= 40 else { throw FeedbackHubError.identityChanged }
+    let current = try loadConversation()
+    try saveConversation(current)
+    var selected = try storage.read(FeedbackConversationRecord.self, file: "conversation-\(id).json")
+      ?? FeedbackConversationRecord(generation: localGeneration, id: id)
+    guard selected.generation == localGeneration else { throw FeedbackHubError.identityChanged }
+    selected.snapshot = snapshot
+    try saveConversation(selected)
+    return selected
+  }
+
   /// Actor-isolated read/modify/write keeps admission and a delayed server reply
   /// from replacing each other's changes to the same local conversation.
   func enqueueConversation(_ source: FeedbackConversationRecord, message: FeedbackConversationRecord.Pending) throws -> FeedbackConversationRecord {
@@ -100,7 +120,7 @@ extension FeedbackHubClient {
       if (snapshot.revision ?? 0) >= (latest.snapshot?.revision ?? 0) { latest.snapshot = snapshot }
     }
     if completed {
-      guard snapshot?.pending == false else { throw FeedbackHubError.invalidResponse }
+      guard snapshot?.pending == false || snapshot?.acceptedMessageID == pending.id.lowercased() else { throw FeedbackHubError.invalidResponse }
       var queue = latest.queued ?? []
       latest.pending = queue.isEmpty ? nil : queue.removeFirst()
       latest.queued = queue.isEmpty ? nil : queue
@@ -142,7 +162,31 @@ extension FeedbackHubClient {
       "conversationId": .string(record.id), "messageId": .string(pending.id.lowercased()), "text": .string(pending.text),
     ]
     if let id = pending.sessionID { fields["sessionId"] = .string(id) }
-    let snapshot = try await decode(FeedbackConversationSnapshot.self, path: "v2/conversations", method: "POST", fields: fields)
+    if asyncConversationAdmission == nil {
+      struct Capabilities: Decodable { let asyncAdmission: Bool }
+      do {
+        let capabilities = try await decode(Capabilities.self, path: "v3/support/capabilities")
+        asyncConversationAdmission = capabilities.asyncAdmission
+      } catch FeedbackHubError.http(404, _, _) { asyncConversationAdmission = false }
+    }
+    var snapshot: FeedbackConversationSnapshot
+    if asyncConversationAdmission == true {
+      struct Admission: Decodable {
+        let accepted: Bool
+        let sequence: Int
+        let conversation: FeedbackConversationSnapshot
+      }
+      let receipt = try await decode(Admission.self, path: "v3/conversations/turns", method: "POST", fields: fields)
+      guard receipt.accepted, receipt.sequence > 0,
+        receipt.conversation.messages.indices.contains(receipt.sequence - 1),
+        receipt.conversation.messages[receipt.sequence - 1].id == pending.id.lowercased() else {
+        throw FeedbackHubError.invalidResponse
+      }
+      snapshot = receipt.conversation
+      snapshot.acceptedMessageID = pending.id.lowercased()
+    } else {
+      snapshot = try await decode(FeedbackConversationSnapshot.self, path: "v2/conversations", method: "POST", fields: fields)
+    }
     guard record.generation == localGeneration, snapshot.id == record.id,
       snapshot.messages.count <= 40,
       snapshot.messages.allSatisfy({ ["user", "assistant"].contains($0.role) && $0.text.utf16.count <= FeedbackConversationRecord.maxTextLength }),

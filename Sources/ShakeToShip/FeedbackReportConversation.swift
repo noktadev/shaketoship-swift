@@ -11,6 +11,7 @@ struct FeedbackReportConversation: View {
   let error: String?
   let screenshot: Data?
   let deliveryPending: Bool
+  let onRead: (String) -> Void
   let onRetry: (String) -> Void
   let onSave: (FeedbackComposerDraftValue) throws -> Void
   let onSend: (FeedbackComposerResult) -> Void
@@ -24,11 +25,12 @@ struct FeedbackReportConversation: View {
   @State private var submittedInput: FeedbackConversationInput?
 
   init(messages: [FeedbackConversationMessage] = [], data: FeedbackComposerData, actionReset: UUID, sending: Bool, error: String?,
-    deliveryPending: Bool = false, screenshot: Data? = nil, onRetry: @escaping (String) -> Void = { _ in },
+    onRead: @escaping (String) -> Void = { _ in }, deliveryPending: Bool = false, screenshot: Data? = nil, onRetry: @escaping (String) -> Void = { _ in },
     onSave: @escaping (FeedbackComposerDraftValue) throws -> Void,
     onSend: @escaping (FeedbackComposerResult) -> Void,
     onRecord: @escaping (FeedbackComposerDraftValue) throws -> Void,
     onDiscard: @escaping () -> Void, onOptOut: (() -> Void)?) {
+    self.onRead = onRead
     self.messages = messages
     self.screenshot = screenshot
     self.deliveryPending = deliveryPending; self.onRetry = onRetry
@@ -53,7 +55,7 @@ struct FeedbackReportConversation: View {
   }
 
   var body: some View {
-    FeedbackConversationView(messages: messages, input: $input, error: localError ?? error,
+    FeedbackConversationView(messages: messages, input: $input, error: localError ?? error, onRead: onRead,
       onDiscard: onDiscard, onOptOut: onOptOut,
       onScreenshot: screenshotAction,
       welcome: "What would you like to tell us?",

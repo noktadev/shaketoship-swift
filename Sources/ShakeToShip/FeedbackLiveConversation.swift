@@ -27,7 +27,7 @@ struct FeedbackLiveConversation: View {
     var result = (record?.snapshot?.messages ?? []).map { message in
       FeedbackConversationMessage(id: message.id, role: message.role == "user" ? .user : .assistant,
         text: message.text.isEmpty && message.sessionId != nil ? "Recording attached" : message.text,
-        delivery: message.role == "user" ? .sent : nil)
+        delivery: message.role == "user" ? .sent : nil, isTeamMessage: message.author == "team")
     }
     for (index, pending) in (record?.pendingMessages ?? []).enumerated() {
       let delivery: FeedbackConversationMessage.Delivery = index == 0 ? (busy ? .sending : .failed) : .queued
@@ -39,17 +39,40 @@ struct FeedbackLiveConversation: View {
           text: pending.text.isEmpty ? "Recording attached" : pending.text, delivery: delivery))
       }
     }
+    if record?.snapshot?.replyError != nil {
+      result.append(.init(id: "reply-unavailable", role: .notice,
+        text: "Your message reached support. An automatic reply is unavailable. The team can still reply here."))
+    }
     return result
   }
   var body: some View {
     NavigationStack {
       VStack(spacing: 0) {
         Menu {
+          if (record?.reservedMessageCount ?? 0) >= 39, record?.pending == nil {
+            Button("Move draft to new conversation", systemImage: "arrow.right") {
+              operation?.cancel(); operation = Task { await startNew(preserveDraft: true) }
+            }.disabled(busy || submitting || preparing)
+          }
           if !messages.isEmpty {
             Button("New conversation", systemImage: "square.and.pencil") {
               if record?.pending != nil { confirmNew = true }
-              else { operation = Task { await startNew() } }
+              else { operation?.cancel(); operation = Task { await startNew() } }
             }.disabled(busy || submitting)
+          }
+          if !model.supportConversations.isEmpty {
+            Menu("Conversations") {
+              if model.supportHistoryCursor != nil {
+                Button("Load older conversations") { Task { await model.loadOlderSupportConversations() } }
+              }
+              ForEach(model.supportConversations) { conversation in
+                Button {
+                  operation?.cancel(); operation = Task { await selectConversation(conversation.id) }
+                } label: {
+                  Text((conversation.unread > 0 ? "● " : "") + (conversation.messages.first?.text.prefix(50).description ?? "Conversation"))
+                }
+              }
+            }
           }
           Button("Cancel", role: .cancel) { dismiss() }
         } label: {
@@ -65,18 +88,18 @@ struct FeedbackLiveConversation: View {
         if capturePending {
           VStack(alignment: .leading, spacing: 8) {
             Text("Your recording could not be added. Your message is saved.")
-            Button("Try adding recording again") { operation = Task { await prepare() } }
+            Button("Try adding recording again") { operation?.cancel(); operation = Task { await prepare() } }
             Button("Discard recording", role: .destructive) { discardCapture() }
           }.padding().disabled(busy || preparing)
         }
         if let draft {
           FeedbackReportConversation(messages: messages, data: draft, actionReset: reset,
-            sending: submitting, error: error,
+            sending: submitting, error: error, onRead: markRead,
             deliveryPending: record?.pendingMessages.contains(where: { $0.id == draft.id }) == true,
             screenshot: omitScreenshot ? nil : screenshot,
             onRetry: { _ in startDelivery() },
             onSave: { try saveDraft($0, id: draft.id) },
-            onSend: { value in operation = Task { await submit(draft, value) } },
+            onSend: { value in operation?.cancel(); operation = Task { await submit(draft, value) } },
             onRecord: { value in
               guard !capturePending else { throw FeedbackHubError.storage }
               try saveDraft(value, id: draft.id)
@@ -87,7 +110,7 @@ struct FeedbackLiveConversation: View {
           FeedbackConversationView(messages: messages, input: .constant(FeedbackConversationInput(isSending: busy, capabilities: [])), error: error, showsComposer: false,
             onSend: { _ in }, onRecord: {}, onAttach: {}, onRetry: { _ in startDelivery() }, onRemove: { _ in })
           if let error { Text(error).padding().accessibilityAddTraits(.updatesFrequently) }
-          if record?.pending == nil && error != nil { Button("Try again") { operation = Task { await load() } }.disabled(busy || submitting) }
+          if record?.pending == nil && error != nil { Button("Try again") { operation?.cancel(); operation = Task { await load() } }.disabled(busy || submitting) }
         }
       }
       .background(theme.background ?? Color(uiColor: .systemGroupedBackground))
@@ -96,14 +119,23 @@ struct FeedbackLiveConversation: View {
     .feedbackTheme()
     .presentationDetents([.large]).presentationDragIndicator(.visible)
     .confirmationDialog("Start a new conversation?", isPresented: $confirmNew, titleVisibility: .visible) {
-      Button("Start new conversation") { operation = Task { await abandonPending() } }
+      Button("Start new conversation") { operation?.cancel(); operation = Task { await abandonPending() } }
       Button("Cancel", role: .cancel) {}
     } message: {
       Text("Messages already sent remain with the team. Unsent messages and their recordings are removed.")
     }
-    .onDisappear { operation?.cancel(); deliveryTask?.cancel() }
+    .onDisappear { operation?.cancel(); deliveryTask?.cancel(); model.visibleConversationID = nil }
     .background(FeedbackSDKPresentationMarker())
-    .task { await load() }
+    .task {
+      await load()
+      if let id = model.supportReplyConversationID, record?.id != id { await selectConversation(id) }
+      model.supportReplyConversationID = nil
+    }
+    .onChange(of: model.supportRevision) { _, _ in
+      operation?.cancel(); operation = Task {
+        if let latest = try? await model.client.loadConversation() { apply(latest) }
+      }
+    }
     .task(id: scenePhase) {
       guard scenePhase == .active else { return }
       while !Task.isCancelled {
@@ -121,6 +153,26 @@ struct FeedbackLiveConversation: View {
     .onChange(of: model.revision) { _, _ in record = nil; draft = nil; dismiss() }
     .onChange(of: model.active) { _, active in if !active { record = nil; draft = nil; dismiss() } }
   }
+  @State private var lastReadMessageID: String?
+  private func markRead(_ id: String) {
+    guard scenePhase == .active, id != lastReadMessageID,
+      let current = record, let index = current.snapshot?.messages.firstIndex(where: { $0.id == id }) else { return }
+    lastReadMessageID = id
+    Task {
+      do {
+        try await model.client.readSupport(current.id, through: index + 1)
+        if let summary = model.supportConversations.firstIndex(where: { $0.id == current.id }) {
+          let oldUnread = model.supportConversations[summary].unread
+          let through = max(model.supportConversations[summary].readThrough, index + 1)
+          model.supportConversations[summary].readThrough = through
+          model.supportConversations[summary].unread = model.supportConversations[summary].messages.enumerated()
+            .filter { $0.element.role == "assistant" && $0.offset + 1 > through }.count
+          model.supportUnreadTotal = max(0, model.supportUnreadTotal - oldUnread + model.supportConversations[summary].unread)
+        }
+      }
+      catch { if lastReadMessageID == id { lastReadMessageID = nil } }
+    }
+  }
   private func check() throws {
     try Task.checkCancellation()
     guard model.active, model.identityGeneration == model.client.localGeneration else {
@@ -137,15 +189,53 @@ struct FeedbackLiveConversation: View {
     do {
       try check()
       record = try await model.client.loadConversation()
+      model.visibleConversationID = record?.id
       try check()
       if record?.pending != nil { startDelivery() } else { await prepare() }
     } catch is CancellationError { return }
     catch { self.error = "Could not load this conversation. Please try again." }
   }
-  private func startNew() async {
+  private func selectConversation(_ id: String) async {
+    guard !submitting, !preparing, !capturePending, let previous = record, previous.id != id else { return }
+    deliveryTask?.cancel()
+    await deliveryTask?.value
+    do {
+      let selected = try await model.client.selectConversation(id)
+      try check()
+      do { try model.draftStore.selectConversation(from: previous.id, to: selected.id) }
+      catch {
+        try await model.client.saveConversation(previous)
+        throw error
+      }
+      record = selected
+      model.visibleConversationID = selected.id
+      draft = nil
+      reset = UUID()
+      omitScreenshot = true
+      await prepare()
+      if selected.pending != nil { startDelivery() }
+    } catch is CancellationError { return }
+    catch { self.error = "Could not open this conversation. Please try again." }
+  }
+  private func startNew(preserveDraft: Bool = false) async {
     guard !busy, !submitting, record?.pending == nil else { return }
     // Keep an unsent message in its existing draft; only the destination conversation changes.
-    do { try await save(.init(generation: model.identityGeneration, id: UUID().uuidString.lowercased())) }
+    do {
+      let next = FeedbackConversationRecord(generation: model.identityGeneration, id: UUID().uuidString.lowercased())
+      let movedDraft = preserveDraft ? try model.draftStore.load() : nil
+      let previousID = record?.id
+      if let previous = record { try model.draftStore.selectConversation(from: previous.id, to: next.id) }
+      if let movedDraft { try model.draftStore.save(movedDraft) }
+      // Only remove the old pointer after the new thread has a durable copy.
+      if movedDraft != nil, let previousID {
+        try model.draftStore.removeArchivedDraft(conversationID: previousID)
+      }
+      try await save(next)
+      model.visibleConversationID = next.id
+      draft = nil
+      reset = UUID()
+      await prepare()
+    }
     catch is CancellationError { return }
     catch { self.error = "Could not start a conversation. Please try again." }
   }
@@ -238,7 +328,7 @@ struct FeedbackLiveConversation: View {
       try? FileManager.default.removeItem(at: value.dir)
       draft = nil
       omitScreenshot = true
-      operation = Task { await prepare() }
+      operation?.cancel(); operation = Task { await prepare() }
     } catch { self.error = "Could not discard your message."; reset = UUID() }
   }
   private func submit(_ data: FeedbackComposerData, _ value: FeedbackComposerResult) async {
@@ -253,12 +343,8 @@ struct FeedbackLiveConversation: View {
         error = "Please shorten your message to 4,000 characters or fewer."
         submitting = false; reset = UUID(); return
       }
-      if current.pending == nil && (current.snapshot?.messages.count ?? 0) >= 39 {
-        current = .init(generation: model.identityGeneration, id: UUID().uuidString.lowercased())
-        try await save(current)
-      }
       guard current.reservedMessageCount < 39 else {
-        error = "This conversation is full. Start a new conversation after delivery finishes."
+        error = "This conversation is full. Use Support to move your draft to a new conversation."
         submitting = false; reset = UUID(); return
       }
       if !value.media.isEmpty {
@@ -348,10 +434,10 @@ struct FeedbackLiveConversation: View {
         // Bounded polling. A pending analysis remains retryable on the same message id.
         for attempt in 0..<4 {
           let snapshot = try await model.client.conversationTurn(current)
-          current = try await model.client.updateConversation(current, pending: pending, snapshot: snapshot, completed: !snapshot.pending)
+          current = try await model.client.updateConversation(current, pending: pending, snapshot: snapshot, completed: snapshot.acceptedMessageID == pending.id.lowercased() || !snapshot.pending)
           try check()
           apply(current)
-          if !snapshot.pending {
+          if snapshot.acceptedMessageID == pending.id.lowercased() || !snapshot.pending {
             if !pending.hasMedia { try? FileManager.default.removeItem(at: dir) }
             break
           }

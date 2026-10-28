@@ -320,6 +320,13 @@ struct ShakeRecorderModifier: ViewModifier {
       // Toast sits top-center; the recording bar is only shown on non-island
       // devices and never at the same moment as a post-upload toast.
       .overlay(alignment: .top) {
+        if let model = ShakeToShip.model, model.active {
+          FeedbackSupportHost(model: model,
+            mayPresent: !showHub && !showConfirm && !isRecording && recordingSession == nil && hud == nil) {
+              model.selectedTab = 3
+              showHub = true
+            }.id(model.identityGeneration)
+        }
         if let hud { FeedbackToast(state: hud).padding(.top, 8) }
       }
       // #1092's transient "shake again to stop" hint is drawn by the ink layer

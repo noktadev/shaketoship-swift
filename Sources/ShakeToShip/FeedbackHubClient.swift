@@ -15,6 +15,8 @@ actor FeedbackHubClient {
     let page: FeedbackIdeaPage
   }
   let config: ShakeToShipConfig
+  private var supportSocket: URLSessionWebSocketTask?
+  var asyncConversationAdmission: Bool?
   let storage: FeedbackHubStorage
   private let transport: any FeedbackTransport
   private let now: @Sendable () -> Date
@@ -67,6 +69,8 @@ actor FeedbackHubClient {
     Task { await self.setActive(false) }
   }
   private func cancel() {
+    closeSupportSocket()
+    asyncConversationAdmission = nil
     epoch = UUID()
     replayEpoch = nil
     replayTask?.cancel()
@@ -165,6 +169,67 @@ actor FeedbackHubClient {
       old == nil || old?.reporterId == result.reporterId
     else { throw FeedbackHubError.invalidResponse }
     return result
+  }
+  func supportSocketRequest() async throws -> URLRequest {
+    try check()
+    let expected = epoch
+    let reporter = try await identity()
+    try check(expected)
+    var request = try makeRequest("v3/support/socket", method: "GET", fields: [:], reporter: reporter)
+    guard var url = URLComponents(url: request.url!, resolvingAgainstBaseURL: false), url.scheme == "https" else {
+      throw FeedbackHubError.invalidResponse
+    }
+    url.scheme = "wss"
+    request.url = url.url
+    // The server renews at 60 seconds. An idle hint channel must outlive that interval.
+    request.timeoutInterval = 120
+    request.setValue("Bearer " + reporter.reporterToken, forHTTPHeaderField: "Authorization")
+    return request
+  }
+  func openSupportSocket() async throws {
+    try check()
+    if supportSocket != nil { return }
+    let expected = epoch
+    let request = try await supportSocketRequest()
+    let socket = URLSession.shared.webSocketTask(with: request)
+    supportSocket = socket
+    socket.resume()
+    let handshakeDeadline = Task {
+      do { try await Task.sleep(for: .seconds(5)) } catch { return }
+      socket.cancel(with: .goingAway, reason: nil)
+    }
+    defer { handshakeDeadline.cancel() }
+    do {
+      try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+          socket.sendPing { error in
+            if let error { continuation.resume(throwing: error) }
+            else { continuation.resume() }
+          }
+        }
+      } onCancel: { socket.cancel(with: .goingAway, reason: nil) }
+      try check(expected)
+    } catch { closeSupportSocket(); throw error }
+  }
+  func closeSupportSocket() {
+    supportSocket?.cancel(with: .goingAway, reason: nil)
+    supportSocket = nil
+  }
+  func waitForSupportHint() async throws {
+    try check()
+    guard let socket = supportSocket else { throw FeedbackHubError.inactive }
+    let expected = epoch
+    do {
+      _ = try await withTaskCancellationHandler {
+        try await socket.receive()
+      } onCancel: { socket.cancel(with: .goingAway, reason: nil) }
+      try check(expected)
+    } catch {
+      let renewed = socket.closeCode == .normalClosure
+      closeSupportSocket()
+      try Task.checkCancellation()
+      if !renewed { throw error }
+    }
   }
   private func makeRequest(
     _ path: String, method: String, fields: [String: FeedbackHubValue],

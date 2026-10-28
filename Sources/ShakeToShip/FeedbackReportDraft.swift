@@ -67,10 +67,37 @@ struct FeedbackReportDraftStore: Sendable {
     try validate(draft)
     try Data().write(to: draft.directory.appendingPathComponent(Self.marker), options: .atomic)
     try storage.write(draft, file: Self.file)
+    if let id = try storage.read(String.self, file: "report-draft-thread.json"), UUID(uuidString: id) != nil {
+      try storage.write(draft, file: "report-draft-\(id).json")
+    }
+  }
+  /// Archive each thread's editable draft without removing its capture ownership marker.
+  func selectConversation(from old: String, to next: String) throws {
+    guard UUID(uuidString: old) != nil, UUID(uuidString: next) != nil else { throw FeedbackHubError.storage }
+    if let current = try load() { try storage.write(current, file: "report-draft-\(old).json") }
+    let archived = try readDraft(file: "report-draft-\(next).json")
+    if let archived { try validate(archived) }
+    try storage.write(next, file: "report-draft-thread.json")
+    if let saved = archived {
+      try validate(saved)
+      try save(saved)
+    } else {
+      let pointer = storage.root.appendingPathComponent(Self.file)
+      if FileManager.default.fileExists(atPath: pointer.path) { try FileManager.default.removeItem(at: pointer) }
+    }
+  }
+  func removeArchivedDraft(conversationID: String) throws {
+    guard UUID(uuidString: conversationID) != nil else { throw FeedbackHubError.storage }
+    let archive = storage.root.appendingPathComponent("report-draft-\(conversationID).json")
+    if FileManager.default.fileExists(atPath: archive.path) { try FileManager.default.removeItem(at: archive) }
   }
   func clear(id: String) throws {
     guard let draft = try readDraft(), draft.id == id else { return }
     try validate(draft)
+    if let thread = try storage.read(String.self, file: "report-draft-thread.json"), UUID(uuidString: thread) != nil {
+      let archive = storage.root.appendingPathComponent("report-draft-\(thread).json")
+      if FileManager.default.fileExists(atPath: archive.path) { try FileManager.default.removeItem(at: archive) }
+    }
     let marker = draft.directory.appendingPathComponent(Self.marker)
     if FileManager.default.fileExists(atPath: marker.path) { try FileManager.default.removeItem(at: marker) }
     do { try FileManager.default.removeItem(at: storage.root.appendingPathComponent(Self.file)) }
@@ -78,8 +105,8 @@ struct FeedbackReportDraftStore: Sendable {
   }
   /// App updates can relocate the data container. Resolve saved paths only into
   /// this outbox and verify its identity binding before exposing or writing a draft.
-  private func readDraft() throws -> FeedbackReportDraft? {
-    guard let draft = try storage.read(FeedbackReportDraft.self, file: Self.file) else { return nil }
+  private func readDraft(file: String = Self.file) throws -> FeedbackReportDraft? {
+    guard let draft = try storage.read(FeedbackReportDraft.self, file: file) else { return nil }
     guard !ownsDirectory(draft.directory) else { return draft }
     guard draft.directory.isFileURL, draft.generation == generation,
       UUID(uuidString: draft.id) != nil, draft.directory.lastPathComponent == draft.id,
@@ -100,7 +127,7 @@ struct FeedbackReportDraftStore: Sendable {
     let restored = FeedbackReportDraft(id: draft.id, directory: directory, generation: draft.generation,
       title: draft.title, note: draft.note, media: media, events: draft.events, captureID: draft.captureID)
     try validate(restored)
-    try storage.write(restored, file: Self.file)
+    try storage.write(restored, file: file)
     return restored
   }
 

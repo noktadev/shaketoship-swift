@@ -8,6 +8,7 @@ struct FeedbackConversationView: View {
   @Binding var input: FeedbackConversationInput
   var error: String?
   var showsComposer = true
+  var onRead: (String) -> Void = { _ in }
   var onDiscard: (() -> Void)?
   var onOptOut: (() -> Void)?
   var onScreenshot: (() -> Void)?
@@ -19,10 +20,13 @@ struct FeedbackConversationView: View {
   let onRetry: (String) -> Void
   let onRemove: (FeedbackMediaItem) -> Void
 
+  @Environment(\.openURL) private var openURL
   @Environment(\.self) private var environment
   @Environment(\.shakeToShipTheme) private var theme
   @Environment(\.dynamicTypeSize) private var typeSize
   @FocusState private var editing: Bool
+  @State private var atBottom = true
+  @State private var hasNewReply = false
   @State private var selectedMedia: FeedbackMediaItem?
   @State private var textBridge = ConversationTextBridge()
 
@@ -61,15 +65,41 @@ struct FeedbackConversationView: View {
               .padding(.trailing, typeSize.isAccessibilitySize ? 0 : 28)
             }
             ForEach(messages) { message in messageRow(message) }
-            if showsComposer { quickReplies }
+            if showsComposer && !messages.contains(where: { $0.role == .user }) { quickReplies }
             Color.clear.frame(height: 1).id("conversation-end")
+              .background(GeometryReader { proxy in
+                Color.clear.preference(key: ConversationFrames.self, value: ["conversation-end": proxy.frame(in: .named("conversation-timeline"))])
+              })
           }
           .padding()
           .frame(minHeight: viewport.size.height, alignment: .bottom)
         }
+        .coordinateSpace(name: "conversation-timeline")
+        .onPreferenceChange(ConversationFrames.self) { frames in
+          if let end = frames["conversation-end"] {
+            atBottom = end.maxY <= viewport.size.height + 24
+            if atBottom { hasNewReply = false }
+          }
+          if let visible = messages.last(where: { message in
+            guard message.role == .assistant, let frame = frames[message.id] else { return false }
+            return frame.minY >= 0 && frame.maxY <= viewport.size.height
+          }) { onRead(visible.id) }
+        }
+        .overlay(alignment: .bottom) {
+          if hasNewReply {
+            Button("New reply") { reader.scrollTo("conversation-end", anchor: .bottom); hasNewReply = false }
+              .buttonStyle(.borderedProminent).padding(8)
+          }
+        }
         .scrollDismissesKeyboard(.interactively)
         .defaultScrollAnchor(.bottom)
-        .onChange(of: messages) { _, _ in reader.scrollTo("conversation-end", anchor: .bottom) }
+        .onChange(of: messages) { old, new in
+          if atBottom || new.last?.role == .user { reader.scrollTo("conversation-end", anchor: .bottom) }
+          else if old.last?.id != new.last?.id { hasNewReply = true }
+        }
+        .onChange(of: input.text) { _, _ in
+          if editing { reader.scrollTo("conversation-end", anchor: .bottom) }
+        }
       }
       .safeAreaInset(edge: .bottom, spacing: 0) { if showsComposer { composer } }
       .background(canvas)
@@ -89,12 +119,15 @@ struct FeedbackConversationView: View {
   }
 
   private func messageRow(_ message: FeedbackConversationMessage) -> some View {
-    HStack(alignment: .top, spacing: 0) {
+    let content = message.content
+    return HStack(alignment: .top, spacing: 0) {
       if message.role == .user && !typeSize.isAccessibilitySize { Spacer(minLength: 28) }
       VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 5) {
-        if !message.text.isEmpty {
-          Text(verbatim: message.text)
-            .textSelection(.enabled)
+        if !content.text.isEmpty {
+          HStack(alignment: .bottom, spacing: 4) {
+            Text(verbatim: content.text).textSelection(.enabled)
+            if message.role == .user { deliveryControl(message) }
+          }
             .foregroundStyle(message.role == .user ? sentText : theme.primaryText ?? .primary)
             .padding(.horizontal, 15).padding(.vertical, 11)
             .background(message.role == .user
@@ -102,17 +135,13 @@ struct FeedbackConversationView: View {
               : theme.surface ?? Color(uiColor: .secondarySystemGroupedBackground),
               in: RoundedRectangle(cornerRadius: 20))
         }
-        ForEach(message.media) { item in attachment(item, removable: false) }
-        if let delivery = message.delivery {
-          Text(delivery.label)
-            .font(.caption).foregroundStyle(theme.secondaryText ?? .secondary)
-            .padding(.horizontal, 3)
-            .accessibilityIdentifier("conversation-status-\(message.id)")
-          if delivery == .failed || delivery == .waitingReply {
-            Button(delivery == .waitingReply ? "Check for reply" : "Try sending again", systemImage: "arrow.clockwise") { onRetry(message.id) }
-              .buttonStyle(.bordered).disabled(!message.canRetry || input.isSending || input.recordingRequested)
+        if message.role == .assistant {
+          ForEach(content.actions) { action in
+            messageAction(action, messageID: message.id, active: showsComposer && message.id == messages.last?.id)
           }
         }
+        ForEach(message.media) { item in attachment(item, removable: false) }
+        if content.text.isEmpty && message.role == .user { deliveryControl(message) }
       }
       if message.role != .user && !typeSize.isAccessibilitySize { Spacer(minLength: 28) }
     }
@@ -120,6 +149,28 @@ struct FeedbackConversationView: View {
     .accessibilityElement(children: .contain)
     .accessibilityLabel(message.role == .user ? "Your message" : message.role == .assistant ? "Support message" : "Update")
     .id(message.id)
+    .background(GeometryReader { proxy in
+      Color.clear.preference(key: ConversationFrames.self, value: [message.id: proxy.frame(in: .named("conversation-timeline"))])
+    })
+  }
+
+  /// Space stays reserved across delivery transitions. Normal delivery is silent.
+  private func deliveryControl(_ message: FeedbackConversationMessage) -> some View {
+    let needsAction = message.delivery == .failed || message.delivery == .waitingReply
+    return Color.clear.frame(width: 44, height: 20).overlay {
+    Button { onRetry(message.id) } label: {
+      Image(systemName: message.delivery == .failed ? "exclamationmark.circle" : "arrow.clockwise")
+        .font(.body)
+        .frame(width: 44, height: 44)
+        .opacity(needsAction ? 1 : 0)
+    }
+    .buttonStyle(.plain)
+    .disabled(!needsAction || !message.canRetry || input.recordingRequested)
+    .accessibilityHidden(!needsAction)
+    .accessibilityLabel(message.delivery == .waitingReply ? "Check for reply" : "Try sending again")
+    .accessibilityHint(message.delivery?.label ?? "")
+    .accessibilityIdentifier("conversation-status-\(message.id)")
+    }
   }
 
   private var composer: some View {
@@ -138,6 +189,14 @@ struct FeedbackConversationView: View {
       }
       HStack(alignment: .bottom, spacing: 10) {
         Menu {
+          if input.recordingAvailable && input.capabilities.contains(.screenRecording) {
+            Button("Record your screen", systemImage: "record.circle") {
+              editing = false
+              onRecord()
+            }
+            .disabled(!input.canRecord)
+            .accessibilityIdentifier("conversation-record-menu")
+          }
           if let onScreenshot {
             Button("Attach current screen", systemImage: "rectangle.dashed", action: onScreenshot)
               .disabled(input.isSending ||
@@ -200,6 +259,40 @@ struct FeedbackConversationView: View {
     .background(canvas)
   }
 
+  @ViewBuilder private func messageAction(_ action: FeedbackConversationAction, messageID: String, active: Bool) -> some View {
+    switch action.kind {
+    case .link(let url):
+      Button {
+        openURL(url)
+      } label: {
+        VStack(alignment: .leading, spacing: 3) {
+          Label(action.label, systemImage: "arrow.up.right")
+          Text(url.host ?? "").font(.caption).foregroundStyle(.secondary)
+        }
+      }
+      .buttonStyle(QuickReplyButtonStyle(canvas: canvas, outline: accent, text: theme.primaryText ?? .primary))
+      .accessibilityHint("Opens " + (url.host ?? "a website"))
+      .accessibilityIdentifier("conversation-action-" + messageID + "-" + action.id)
+    case .reply(let text):
+      Button(action.label) {
+        appendReply(text)
+      }
+      .buttonStyle(QuickReplyButtonStyle(canvas: canvas, outline: accent, text: theme.primaryText ?? .primary))
+      .disabled(!active || input.recordingRequested || !input.capabilities.contains(.text))
+      .accessibilityHint(active ? "Adds text to your message. You can edit it before sending." : "This option belongs to an earlier message.")
+      .accessibilityIdentifier("conversation-action-" + messageID + "-" + action.id)
+    case .recordScreen:
+      Button(action.label, systemImage: "record.circle") {
+        editing = false
+        onRecord()
+      }
+      .buttonStyle(QuickReplyButtonStyle(canvas: canvas, outline: accent, text: theme.primaryText ?? .primary))
+      .disabled(!active || !input.canRecord)
+      .accessibilityHint(active ? input.recordingDescription : "This option belongs to an earlier message.")
+      .accessibilityIdentifier("conversation-action-" + messageID + "-" + action.id)
+    }
+  }
+
   @ViewBuilder private var quickReplies: some View {
     if input.capabilities.contains(.text) ||
       (input.recordingAvailable && input.capabilities.contains(.screenRecording)) {
@@ -230,15 +323,20 @@ struct FeedbackConversationView: View {
 
   private func quickReply(_ text: String, id: String) -> some View {
     Button {
-      let separator = input.text.isEmpty || input.text.hasSuffix("\n") ? "" : "\n"
-      input.text += separator + text + ": "
-      editing = true
+      appendReply(text + ": ")
     } label: {
       Text(text)
     }
     .disabled(input.recordingRequested)
     .accessibilityHint("Adds text to your message. You can edit it before sending.")
     .accessibilityIdentifier("conversation-quick-" + id)
+  }
+
+  private func appendReply(_ text: String) {
+    let current = textBridge.commitText() ?? input.text
+    let separator = current.isEmpty || current.hasSuffix("\n") ? "" : "\n"
+    input.text = current + separator + text
+    editing = true
   }
 
   private struct QuickReplyButtonStyle: ButtonStyle {
@@ -284,6 +382,13 @@ struct FeedbackConversationView: View {
       in: RoundedRectangle(cornerRadius: 14))
   }
 }
+private struct ConversationFrames: PreferenceKey {
+  static let defaultValue: [String: CGRect] = [:]
+  static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+    value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+  }
+}
+
 /// Reads the focused native editor at the explicit Send boundary. SwiftUI's
 /// binding can still contain the preceding edit while UIKit displays newer text.
 /// Committing marked text keeps the keyboard and first responder in place.

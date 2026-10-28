@@ -25,6 +25,11 @@ struct FeedbackConversationMessage: Identifiable, Equatable, Sendable {
   var media: [FeedbackMediaItem] = []
   var delivery: Delivery?
   var canRetry = true
+  var isTeamMessage = false
+
+  var content: FeedbackConversationContent {
+    FeedbackConversationContent(text: text, allowsActions: role == .assistant && isTeamMessage)
+  }
 }
 
 /// Reuses the report composer's capability and attachment rules.

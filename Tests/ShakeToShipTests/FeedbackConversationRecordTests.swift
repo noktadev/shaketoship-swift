@@ -71,7 +71,7 @@ struct FeedbackConversationRecordTests {
     record.pending = .init(id: id, text: "Please add offline practice", hasMedia: false)
     try await client.saveConversation(record)
     #expect(try await client.loadConversation() == record)
-    await transport.prepare([(200, hubIdentityJSON()), (503, "Unavailable")])
+    await transport.prepare([(200, hubIdentityJSON()), (404, "Not found"), (503, "Unavailable")])
     do { _ = try await client.conversationTurn(record); Issue.record("Expected network failure") }
     catch { }
     #expect(try await client.loadConversation().pending?.id == id)
@@ -151,5 +151,45 @@ extension FeedbackConversationRecordTests {
       _ = try await client.mergeConversationSnapshot(sending, snapshot: human)
       Issue.record("A late refresh must not restore an erased transcript")
     } catch { }
+  }
+}
+
+extension FeedbackConversationRecordTests {
+  @Test func asyncReceiptAdvancesQueueBeforeAssistantReply() async throws {
+    let transport = HubTestTransport()
+    let (client, root, _) = try FeedbackHubClientTests().fixture(transport: transport)
+    defer { try? FileManager.default.removeItem(at: root) }
+    await client.setActive(true)
+    let initial = try await client.loadConversation()
+    let first = FeedbackConversationRecord.Pending(id: UUID().uuidString.lowercased(), text: "First", hasMedia: false)
+    let second = FeedbackConversationRecord.Pending(id: UUID().uuidString.lowercased(), text: "Second", hasMedia: false)
+    let record = try await client.enqueueConversation(initial, message: first)
+    _ = try await client.enqueueConversation(record, message: second)
+    let snapshot = FeedbackConversationSnapshot(id: record.id, messages: [
+      .init(id: first.id, role: "user", text: first.text, sessionId: nil, replyTo: nil)
+    ], kind: "feedback", summary: "", complete: false, pending: true)
+    let json = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
+    await transport.prepare([(200, hubIdentityJSON()), (200, #"{"asyncAdmission":true}"#),
+      (202, "{\"accepted\":true,\"sequence\":1,\"conversation\":\(json)}")])
+    let receipt = try await client.conversationTurn(record)
+    #expect(receipt.pending)
+    #expect(receipt.acceptedMessageID == first.id)
+    let advanced = try await client.updateConversation(record, pending: first, snapshot: receipt, completed: true)
+    #expect(advanced.pending?.id == second.id)
+    #expect(advanced.snapshot?.messages.count == 1)
+  }
+
+  @Test func capabilityFailureRetainsQueueWithoutSilentV2Downgrade() async throws {
+    let transport = HubTestTransport()
+    let (client, root, _) = try FeedbackHubClientTests().fixture(transport: transport)
+    defer { try? FileManager.default.removeItem(at: root) }
+    await client.setActive(true)
+    let initial = try await client.loadConversation()
+    let message = FeedbackConversationRecord.Pending(id: UUID().uuidString.lowercased(), text: "Keep me", hasMedia: false)
+    let record = try await client.enqueueConversation(initial, message: message)
+    await transport.prepare([(200, hubIdentityJSON()), (503, "Unavailable")])
+    do { _ = try await client.conversationTurn(record); Issue.record("Expected failure") } catch { }
+    #expect(try await client.loadConversation().pending?.id == message.id)
+    #expect(await transport.requests.allSatisfy { $0.url?.path != "/v2/conversations" })
   }
 }

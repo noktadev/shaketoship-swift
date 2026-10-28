@@ -8,6 +8,14 @@ final class FeedbackHubModel {
   let config: ShakeToShipConfig
   let identityGeneration: UUID
   let draftStore: FeedbackReportDraftStore
+  var supportConversations: [FeedbackSupportSummary] = []
+  var supportReplyConversationID: String?
+  var visibleConversationID: String?
+  var supportRevision = UUID()
+  var supportBannersEnabled = false
+  var supportHistoryCursor: String?
+  var supportUnreadTotal = 0
+  var supportUnread: Int { supportUnreadTotal }
   var active = true
   var revision = UUID()
   var visibilityRevision = UUID()
@@ -48,6 +56,9 @@ final class FeedbackHubModel {
     if FeedbackManualTrigger.reportRecording?.store.generation == identityGeneration {
       FeedbackManualTrigger.reportRecording = nil
     }
+    supportConversations = []; supportHistoryCursor = nil; supportUnreadTotal = 0
+    supportReplyConversationID = nil
+    visibleConversationID = nil
     loading = false
     promptLoading = false
     listRequest = UUID()
@@ -361,6 +372,13 @@ public enum ShakeToShip {
     guard let model, model.active, model.config.hub.contains(.inbox) else { return 0 }
     return model.inbox.count
   }
+  /// Technical and usage hints only. Values do not authenticate or link a customer.
+  public static func updateSupportContext(_ values: [String: String]) async throws {
+    guard let model, model.active else { return }
+    let fields = Dictionary(uniqueKeysWithValues: values.map { ("context_" + $0.key, FeedbackHubValue.string($0.value)) })
+    _ = try await model.client.request("v3/support/context", method: "POST", fields: fields)
+  }
+  public static var unreadSupportCount: Int { model?.active == true ? model?.supportUnread ?? 0 : 0 }
   public static func presentHub() {
     guard let model, model.active else { return }
     #if canImport(UIKit)
